@@ -347,9 +347,7 @@ class TradingAgentsGraph:
         if self.debug:
             trace = []
             for chunk in self.graph.stream(init_agent_state, **args):
-                if len(chunk["messages"]) == 0:
-                    pass
-                else:
+                if len(chunk.get("messages", [])) > 0:
                     chunk["messages"][-1].pretty_print()
                 trace.append(chunk)
             # Streamed chunks are per-node deltas. Merge them so the returned
