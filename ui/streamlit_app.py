@@ -1,11 +1,9 @@
 # Local web UI for TradingAgents.
 #
-# Run (pick one):
-#   cd …/TradingAgents-main && python3 -m streamlit run ui/streamlit_app.py
-#   cd …/TradingAgents-main && sh scripts/run-ui.sh
-#   cd …/TradingAgents-main && python3 -m pip install -e . && python3 -m cli.main ui
-#
-# If `pip` is missing, use:  python3 -m pip install -e .
+# Run (pick one) — use a venv first if Homebrew Python shows "externally-managed-environment":
+#   sh scripts/setup-venv.sh
+#   source .venv/bin/activate && python -m cli.main ui
+#   source .venv/bin/activate && sh scripts/run-ui.sh
 
 from __future__ import annotations
 
@@ -358,9 +356,9 @@ def main() -> None:
     st.set_page_config(page_title="TradingAgents", layout="wide", initial_sidebar_state="expanded")
     st.title("TradingAgents")
     st.caption(
-        "Runs locally. Needs **Python 3.10+** (not Apple’s 3.9). Install: "
-        "`python3 -m pip install --upgrade pip` then `python3 -m pip install -e .`  ·  "
-        "Open UI: `python3 -m streamlit run ui/streamlit_app.py` or `python3 -m cli.main ui` or `sh scripts/run-ui.sh`"
+        "Runs locally. Needs **Python 3.10+**. If `pip install` says **externally-managed-environment**, "
+        "run **`sh scripts/setup-venv.sh`** then **`source .venv/bin/activate`** and use **`python -m cli.main ui`** "
+        "or **`sh scripts/run-ui.sh`**."
     )
 
     page = st.radio(
