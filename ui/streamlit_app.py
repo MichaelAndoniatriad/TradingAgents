@@ -358,7 +358,8 @@ def main() -> None:
     st.set_page_config(page_title="TradingAgents", layout="wide", initial_sidebar_state="expanded")
     st.title("TradingAgents")
     st.caption(
-        "Runs locally. Install deps: `python3 -m pip install -e .`  ·  "
+        "Runs locally. Needs **Python 3.10+** (not Apple’s 3.9). Install: "
+        "`python3 -m pip install --upgrade pip` then `python3 -m pip install -e .`  ·  "
         "Open UI: `python3 -m streamlit run ui/streamlit_app.py` or `python3 -m cli.main ui` or `sh scripts/run-ui.sh`"
     )
 
