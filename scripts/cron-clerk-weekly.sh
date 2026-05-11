@@ -7,6 +7,8 @@
 #   CLERK_WEBHOOK=https://...
 #   CLERK_WEEKLY_CRON_LOG=~/.../clerk-weekly.log
 #
+# Pause: Clerk UI, or touch ~/.tradingagents/automation/clerk_scheduled_automation_paused
+#
 # Crontab example (Sunday 8:00):
 #   0 8 * * SUN /path/to/TradingAgents-main/scripts/cron-clerk-weekly.sh
 
@@ -16,6 +18,12 @@ cd "$ROOT"
 
 LOG="${CLERK_WEEKLY_CRON_LOG:-$HOME/.tradingagents/logs/clerk-weekly.log}"
 mkdir -p "$(dirname "$LOG")"
+
+PAUSE="${HOME}/.tradingagents/automation/clerk_scheduled_automation_paused"
+if [[ -f "$PAUSE" ]]; then
+  echo "$(date "+%Y-%m-%dT%H:%M:%S%z") clerk weekly skipped (automation paused)" >>"$LOG"
+  exit 0
+fi
 
 if [[ -x "$ROOT/.venv/bin/python" ]]; then
   PY="$ROOT/.venv/bin/python"

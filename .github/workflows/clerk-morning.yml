@@ -10,15 +10,15 @@
 #
 # Optional repository Variables:
 #   CLERK_DEEP_RESEARCH = true        (adds --deep-research on scheduled runs; costs API $)
+#   CLERK_AUTOMATION_PAUSED = true    (when you add a `schedule:` below, skips scheduled runs only)
 #
-# Cron is UTC. Example: 12:30 UTC ≈ 07:30 US Eastern (STD). Adjust as needed.
+# Scheduled runs are disabled until you add a `schedule:` block under `on:`.
+# Example (UTC):  - cron: "30 12 * * *"
 # Note: eToro’s API may reject requests from some cloud/datacenter IPs; if login fails,
 # use local cron/launchd instead, or a small VPS with a residential/stable IP.
 name: Clerk morning
 
 on:
-  schedule:
-    - cron: "30 12 * * *"
   workflow_dispatch:
     inputs:
       deep_research:
@@ -33,6 +33,7 @@ concurrency:
 
 jobs:
   morning:
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.CLERK_AUTOMATION_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:

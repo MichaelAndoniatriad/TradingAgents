@@ -12,6 +12,9 @@
 #   CLERK_WEBHOOK=https://...      (optional; overrides TRADINGAGENTS_CLERK_WEBHOOK_URL)
 #   CLERK_CRON_LOG=~/.../clerk-morning.log
 #
+# Pause: use the Clerk page in the UI (Pause), or touch:
+#   ~/.tradingagents/automation/clerk_scheduled_automation_paused
+#
 # Crontab example (7:00 daily):
 #   0 7 * * * /path/to/TradingAgents-main/scripts/cron-clerk-morning.sh
 
@@ -21,6 +24,12 @@ cd "$ROOT"
 
 LOG="${CLERK_CRON_LOG:-$HOME/.tradingagents/logs/clerk-morning.log}"
 mkdir -p "$(dirname "$LOG")"
+
+PAUSE="${HOME}/.tradingagents/automation/clerk_scheduled_automation_paused"
+if [[ -f "$PAUSE" ]]; then
+  echo "$(date "+%Y-%m-%dT%H:%M:%S%z") clerk morning skipped (automation paused — remove $PAUSE or use UI Continue)" >>"$LOG"
+  exit 0
+fi
 
 if [[ -x "$ROOT/.venv/bin/python" ]]; then
   PY="$ROOT/.venv/bin/python"

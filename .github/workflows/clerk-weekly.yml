@@ -5,13 +5,13 @@
 #
 # Optional repository Variables:
 #   CLERK_WEEKLY_NO_LLM = true   (skip the weekly LLM narrative)
+#   CLERK_AUTOMATION_PAUSED = true (when you add a `schedule:` below, skips scheduled runs only)
 #
-# Cron is UTC (Sunday 13:00 UTC here — adjust for your weekend preference).
+# Scheduled runs are disabled until you add a `schedule:` block under `on:`.
+# Example (UTC):  - cron: "0 13 * * 0"
 name: Clerk weekly
 
 on:
-  schedule:
-    - cron: "0 13 * * 0"
   workflow_dispatch:
 
 concurrency:
@@ -20,6 +20,7 @@ concurrency:
 
 jobs:
   weekly:
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.CLERK_AUTOMATION_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:

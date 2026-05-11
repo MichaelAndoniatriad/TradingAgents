@@ -17,6 +17,10 @@ import streamlit as st
 
 import tradingagents  # noqa: F401 — loads .env
 
+from tradingagents.clerk.automation_state import (
+    is_clerk_scheduled_automation_paused,
+    set_clerk_scheduled_automation_paused,
+)
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
@@ -223,6 +227,30 @@ def _page_clerk() -> None:
     st.markdown(
         "Uses headline diffs (and optional deep research when triggers hit). "
         "Webhook: set `TRADINGAGENTS_CLERK_WEBHOOK_URL` in `.env`."
+    )
+
+    st.markdown("#### Scheduled automation (cron / launchd)")
+    paused = is_clerk_scheduled_automation_paused()
+    if paused:
+        st.warning(
+            "Automation is **paused**: `scripts/cron-clerk-morning.sh` and "
+            "`scripts/cron-clerk-weekly.sh` exit immediately until you continue."
+        )
+    else:
+        st.success("Automation is **running** (local cron scripts are not blocked).")
+    b1, b2, _ = st.columns([1, 1, 4])
+    with b1:
+        if st.button("Pause", use_container_width=True, disabled=paused, key="clerk_automation_pause"):
+            set_clerk_scheduled_automation_paused(True)
+            st.rerun()
+    with b2:
+        if st.button("Continue", use_container_width=True, disabled=not paused, key="clerk_automation_continue"):
+            set_clerk_scheduled_automation_paused(False)
+            st.rerun()
+    st.caption(
+        "Marker file: `~/.tradingagents/automation/clerk_scheduled_automation_paused`. "
+        "GitHub Actions have **no schedule** in the repo until you add one; "
+        "when you do, set variable `CLERK_AUTOMATION_PAUSED=true` to skip scheduled cloud runs."
     )
 
     use_etoro = st.checkbox("Use live eToro open positions as tickers", value=False)
