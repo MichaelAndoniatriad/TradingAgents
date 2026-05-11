@@ -1,5 +1,6 @@
 from typing import Optional
 import datetime
+import json
 import typer
 import questionary
 from pathlib import Path
@@ -253,6 +254,15 @@ def format_tokens(n):
     return str(n)
 
 
+def format_usd(amount: float) -> str:
+    """Format USD amounts for compact terminal display."""
+    if amount >= 100:
+        return f"${amount:,.0f}"
+    if amount >= 1:
+        return f"${amount:,.2f}"
+    return f"${amount:.4f}"
+
+
 def update_display(layout, spinner_text=None, stats_handler=None, start_time=None):
     # Header with welcome message
     layout["header"].update(
@@ -444,6 +454,9 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
         else:
             tokens_str = "Tokens: --"
         stats_parts.append(tokens_str)
+        estimated_cost = float(stats.get("estimated_cost_usd", 0.0) or 0.0)
+        if estimated_cost > 0:
+            stats_parts.append(f"Cost(est): {format_usd(estimated_cost)}")
 
     stats_parts.append(f"Reports: {reports_completed}/{reports_total}")
 
@@ -984,7 +997,7 @@ def run_analysis(checkpoint: bool = False):
     config["checkpoint_enabled"] = checkpoint
 
     # Create stats callback handler for tracking LLM/tool calls
-    stats_handler = StatsCallbackHandler()
+    stats_handler = StatsCallbackHandler(model_pricing=config.get("model_pricing"))
 
     # Normalize analyst selection to predefined order (selection is a 'set', order is fixed)
     selected_set = {analyst.value for analyst in selections["analysts"]}
@@ -1214,6 +1227,47 @@ def run_analysis(checkpoint: bool = False):
 
     # Post-analysis prompts (outside Live context for clean interaction)
     console.print("\n[bold cyan]Analysis Complete![/bold cyan]\n")
+    stats = stats_handler.get_stats()
+    estimated_total = float(stats.get("estimated_cost_usd", 0.0) or 0.0)
+    if estimated_total > 0:
+        console.print(
+            f"[bold]Estimated runtime cost:[/bold] {format_usd(estimated_total)} "
+            "[dim](based on configured model_pricing)[/dim]"
+        )
+        model_lines = []
+        for model_name, model_stats in sorted(
+            stats.get("models", {}).items(),
+            key=lambda item: item[1].get("estimated_cost_usd", 0.0),
+            reverse=True,
+        ):
+            model_cost = float(model_stats.get("estimated_cost_usd", 0.0) or 0.0)
+            if model_cost <= 0:
+                continue
+            model_lines.append(
+                f"  - {model_name}: {format_usd(model_cost)} "
+                f"({format_tokens(model_stats.get('tokens_in', 0))}\u2191/"
+                f"{format_tokens(model_stats.get('tokens_out', 0))}\u2193)"
+            )
+        if model_lines:
+            console.print("[bold]By model:[/bold]")
+            for line in model_lines:
+                console.print(line)
+        cost_report_path = results_dir / "cost_report.json"
+        try:
+            payload = {
+                "timestamp_utc": datetime.datetime.utcnow().isoformat() + "Z",
+                "ticker": selections["ticker"],
+                "analysis_date": selections["analysis_date"],
+                "llm_provider": config["llm_provider"],
+                "quick_think_llm": config["quick_think_llm"],
+                "deep_think_llm": config["deep_think_llm"],
+                "stats": stats,
+            }
+            with open(cost_report_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            console.print(f"[dim]Cost report saved:[/dim] {cost_report_path}")
+        except Exception as e:
+            console.print(f"[yellow]Could not save cost report: {e}[/yellow]")
 
     # Prompt to save report
     save_choice = typer.prompt("Save report?", default="Y").strip().upper()

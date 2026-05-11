@@ -109,6 +109,38 @@ class DeepSeekChatOpenAI(NormalizedChatOpenAI):
         return chat_result
 
 
+class DeepSeekExtraBodyChatOpenAI(DeepSeekChatOpenAI):
+    """DeepSeek chat with ``extra_body`` merged (e.g. ``thinking`` flags on V4 Pro)."""
+
+    def __init__(self, *args, **kwargs):
+        self._deepseek_extra_body: dict = dict(kwargs.pop("deepseek_extra_body", None) or {})
+        super().__init__(*args, **kwargs)
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        if self._deepseek_extra_body:
+            merged = dict(payload.get("extra_body") or {})
+            merged.update(self._deepseek_extra_body)
+            payload["extra_body"] = merged
+        return payload
+
+
+class NormalizedExtraBodyChatOpenAI(NormalizedChatOpenAI):
+    """OpenAI-compatible chat (e.g. OpenRouter) with ``extra_body`` merged per request."""
+
+    def __init__(self, *args, **kwargs):
+        self._normalized_extra_body: dict = dict(kwargs.pop("normalized_extra_body", None) or {})
+        super().__init__(*args, **kwargs)
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        if self._normalized_extra_body:
+            merged = dict(payload.get("extra_body") or {})
+            merged.update(self._normalized_extra_body)
+            payload["extra_body"] = merged
+        return payload
+
+
 class MinimaxChatOpenAI(NormalizedChatOpenAI):
     """MiniMax-specific overrides on top of the OpenAI-compatible client.
 
@@ -134,6 +166,7 @@ class MinimaxChatOpenAI(NormalizedChatOpenAI):
 _PASSTHROUGH_KWARGS = (
     "timeout", "max_retries", "reasoning_effort",
     "api_key", "callbacks", "http_client", "http_async_client",
+    "max_completion_tokens",
 )
 
 # Provider base URLs. API-key env vars live in api_key_env.PROVIDER_API_KEY_ENV
@@ -221,15 +254,47 @@ class OpenAIClient(BaseLLMClient):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
 
-        # Native OpenAI: use Responses API for consistent behavior across
-        # all model families. Third-party providers use Chat Completions.
+        # Native OpenAI: use Responses API for GPT-4/5 families. o-series
+        # historically uses Chat Completions with ``max_completion_tokens``.
+        # OpenRouter o-series IDs look like ``openai/o1-mini`` — same chat path.
+        o_series_native = self.provider == "openai" and self.model.startswith(("o1", "o3"))
+        o_series_or = self.provider == "openrouter" and (
+            "/o1" in self.model or "/o3" in self.model
+        )
         if self.provider == "openai":
-            llm_kwargs["use_responses_api"] = True
+            if o_series_native:
+                llm_kwargs["use_responses_api"] = False
+                llm_kwargs.pop("max_tokens", None)
+                if "max_completion_tokens" not in llm_kwargs:
+                    mct = self.kwargs.get("max_completion_tokens") or self.kwargs.get(
+                        "max_tokens"
+                    )
+                    if mct is not None:
+                        llm_kwargs["max_completion_tokens"] = int(mct)
+            else:
+                llm_kwargs["use_responses_api"] = True
+        elif o_series_or:
+            llm_kwargs["use_responses_api"] = False
+            llm_kwargs.pop("max_tokens", None)
+            if "max_completion_tokens" not in llm_kwargs:
+                mct = self.kwargs.get("max_completion_tokens") or self.kwargs.get(
+                    "max_tokens"
+                )
+                if mct is not None:
+                    llm_kwargs["max_completion_tokens"] = int(mct)
 
         # Provider-specific quirks live in their own subclasses so the
         # base NormalizedChatOpenAI stays free of provider branches.
         if self.provider == "deepseek":
-            chat_cls = DeepSeekChatOpenAI
+            extra_merge = self.kwargs.get("extra_body")
+            if extra_merge:
+                llm_kwargs["deepseek_extra_body"] = extra_merge
+                chat_cls = DeepSeekExtraBodyChatOpenAI
+            else:
+                chat_cls = DeepSeekChatOpenAI
+        elif self.provider == "openrouter" and self.kwargs.get("extra_body"):
+            llm_kwargs["normalized_extra_body"] = self.kwargs["extra_body"]
+            chat_cls = NormalizedExtraBodyChatOpenAI
         elif self.provider in ("minimax", "minimax-cn"):
             chat_cls = MinimaxChatOpenAI
         else:

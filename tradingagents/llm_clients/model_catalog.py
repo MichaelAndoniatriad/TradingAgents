@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 ModelOption = Tuple[str, str]
 ProviderModeOptions = Dict[str, Dict[str, List[ModelOption]]]
@@ -80,12 +80,17 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("GPT-5.4 Nano - Cheapest, high-volume tasks", "gpt-5.4-nano"),
             ("GPT-5.5 - Latest frontier, 1M context", "gpt-5.5"),
             ("GPT-4.1 - Smartest non-reasoning model", "gpt-4.1"),
+            ("GPT-4o mini - Fallback / high-volume", "gpt-4o-mini"),
+            ("o1-preview - Slow reasoning (vault tier)", "o1-preview"),
+            ("GPT-5.5 snapshot (corporate exec)", "gpt-5.5-2026-04-23"),
         ],
         "deep": [
             ("GPT-5.5 - Latest frontier, 1M context", "gpt-5.5"),
             ("GPT-5.4 - Previous-gen frontier, 1M context, cost-effective", "gpt-5.4"),
             ("GPT-5.2 - Strong reasoning, cost-effective", "gpt-5.2"),
             ("GPT-5.5 Pro - Most capable, expensive ($30/$180 per 1M tokens)", "gpt-5.5-pro"),
+            ("GPT-5.5 snapshot (corporate exec)", "gpt-5.5-2026-04-23"),
+            ("o1-preview - Slow reasoning (vault tier)", "o1-preview"),
         ],
     },
     "anthropic": {
@@ -93,12 +98,14 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("Claude Sonnet 4.6 - Best speed and intelligence balance", "claude-sonnet-4-6"),
             ("Claude Haiku 4.5 - Fastest with near-frontier intelligence", "claude-haiku-4-5"),
             ("Claude Sonnet 4.5 - High-performance for agents and coding", "claude-sonnet-4-5"),
+            ("Claude 3.5 Sonnet latest (corporate narrative tier)", "claude-3-5-sonnet-latest"),
         ],
         "deep": [
             ("Claude Opus 4.7 - Latest frontier, long-running agents and coding", "claude-opus-4-7"),
             ("Claude Opus 4.6 - Frontier intelligence, agents and coding", "claude-opus-4-6"),
             ("Claude Opus 4.5 - Premium, max intelligence", "claude-opus-4-5"),
             ("Claude Sonnet 4.6 - Best speed and intelligence balance", "claude-sonnet-4-6"),
+            ("Claude 3.5 Sonnet latest (corporate narrative tier)", "claude-3-5-sonnet-latest"),
         ],
     },
     "google": {
@@ -107,12 +114,14 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("Gemini 2.5 Flash - Balanced, stable", "gemini-2.5-flash"),
             ("Gemini 3.1 Flash Lite - Most cost-efficient (GA)", "gemini-3.1-flash-lite"),
             ("Gemini 2.5 Flash Lite - Fast, low-cost", "gemini-2.5-flash-lite"),
+            ("Gemini 1.5 Flash 002 - Bulk context (corporate news tier)", "gemini-1.5-flash-002"),
         ],
         "deep": [
             ("Gemini 3.1 Pro - Reasoning-first, complex workflows (preview)", "gemini-3.1-pro-preview"),
             ("Gemini 3 Flash - Next-gen fast (preview)", "gemini-3-flash-preview"),
             ("Gemini 2.5 Pro - Stable pro model", "gemini-2.5-pro"),
             ("Gemini 2.5 Flash - Balanced, stable", "gemini-2.5-flash"),
+            ("Gemini 1.5 Flash 002 - Bulk context (corporate news tier)", "gemini-1.5-flash-002"),
         ],
     },
     "xai": {
@@ -175,6 +184,21 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("Custom model ID", "custom"),
         ],
     },
+    "openrouter": {
+        "quick": [
+            ("OR: DeepSeek Chat (fast)", "deepseek/deepseek-chat"),
+            ("OR: GPT-4o mini", "openai/gpt-4o-mini"),
+            ("OR: Gemini 2.0 Flash", "google/gemini-2.0-flash-001"),
+            ("Custom model ID", "custom"),
+        ],
+        "deep": [
+            ("OR: GPT-4o", "openai/gpt-4o"),
+            ("OR: Claude 3.5 Sonnet", "anthropic/claude-3.5-sonnet"),
+            ("OR: DeepSeek R1", "deepseek/deepseek-r1"),
+            ("OR: o1-mini (vault-style)", "openai/o1-mini"),
+            ("Custom model ID", "custom"),
+        ],
+    },
 }
 
 
@@ -195,3 +219,34 @@ def get_known_models() -> Dict[str, List[str]]:
         )
         for provider, mode_options in MODEL_OPTIONS.items()
     }
+
+
+# ---------------------------------------------------------------------------
+# Corporate hierarchy — OpenRouter-only routing (edit in default_config /
+# Streamlit settings via ``agent_llm_routing``; not env-overridable).
+# Model IDs are OpenRouter slugs (``upstream/model``).
+# ---------------------------------------------------------------------------
+
+OR_DEEPSEEK_FLASH = "deepseek/deepseek-chat"
+OR_DEEPSEEK_R1 = "deepseek/deepseek-r1"
+OR_GEMINI_FLASH = "google/gemini-2.0-flash-001"
+OR_CLAUDE_SONNET = "anthropic/claude-3.5-sonnet"
+OR_OPENAI_EXEC = "openai/gpt-4o"
+OR_OPENAI_VAULT = "openai/o1-mini"
+
+# ``provider`` is always ``openrouter`` (enforced in corporate_llm_factory).
+DEFAULT_CORPORATE_AGENT_ROUTING: Dict[str, Dict[str, Any]] = {
+    "market_analyst": {"provider": "openrouter", "model": OR_DEEPSEEK_FLASH},
+    "sentiment_analyst": {"provider": "openrouter", "model": OR_DEEPSEEK_FLASH},
+    "fundamentals_analyst": {"provider": "openrouter", "model": OR_DEEPSEEK_FLASH},
+    "news_analyst": {"provider": "openrouter", "model": OR_GEMINI_FLASH},
+    "bull_researcher": {"provider": "openrouter", "model": OR_CLAUDE_SONNET},
+    "bear_researcher": {"provider": "openrouter", "model": OR_CLAUDE_SONNET},
+    "trader": {"provider": "openrouter", "model": OR_DEEPSEEK_R1},
+    "risk_aggressive": {"provider": "openrouter", "model": OR_OPENAI_EXEC},
+    "risk_neutral": {"provider": "openrouter", "model": OR_OPENAI_EXEC},
+    "risk_conservative": {"provider": "openrouter", "model": OR_OPENAI_EXEC},
+    "research_manager": {"provider": "openrouter", "model": OR_OPENAI_EXEC},
+    "portfolio_manager": {"provider": "openrouter", "model": OR_OPENAI_VAULT},
+    "reflection": {"provider": "openrouter", "model": OR_DEEPSEEK_FLASH},
+}

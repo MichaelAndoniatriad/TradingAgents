@@ -14,10 +14,12 @@ logger = logging.getLogger(__name__)
 from langgraph.prebuilt import ToolNode
 
 from tradingagents.llm_clients import create_llm_client
+from tradingagents.llm_clients.corporate_llm_factory import build_corporate_hierarchy_llms
 
 from tradingagents.agents import *
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.agents.utils.memory import TradingMemoryLog
+from tradingagents.agents.utils.rating import parse_rating
 from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.agents.utils.agent_states import (
     AgentState,
@@ -76,29 +78,31 @@ class TradingAgentsGraph:
         os.makedirs(self.config["data_cache_dir"], exist_ok=True)
         os.makedirs(self.config["results_dir"], exist_ok=True)
 
-        # Initialize LLMs with provider-specific thinking configuration
         llm_kwargs = self._get_provider_kwargs()
-
-        # Add callbacks to kwargs if provided (passed to LLM constructor)
         if self.callbacks:
             llm_kwargs["callbacks"] = self.callbacks
 
-        deep_client = create_llm_client(
-            provider=self.config["llm_provider"],
-            model=self.config["deep_think_llm"],
-            base_url=self.config.get("backend_url"),
-            **llm_kwargs,
-        )
-        quick_client = create_llm_client(
-            provider=self.config["llm_provider"],
-            model=self.config["quick_think_llm"],
-            base_url=self.config.get("backend_url"),
-            **llm_kwargs,
-        )
+        if self.config.get("corporate_hierarchy_enabled"):
+            self.llm_by_role = build_corporate_hierarchy_llms(self.config, self.callbacks)
+            self.quick_thinking_llm = self.llm_by_role["reflection"]
+            self.deep_thinking_llm = self.llm_by_role["research_manager"]
+        else:
+            self.llm_by_role = None
+            deep_client = create_llm_client(
+                provider=self.config["llm_provider"],
+                model=self.config["deep_think_llm"],
+                base_url=self.config.get("backend_url"),
+                **llm_kwargs,
+            )
+            quick_client = create_llm_client(
+                provider=self.config["llm_provider"],
+                model=self.config["quick_think_llm"],
+                base_url=self.config.get("backend_url"),
+                **llm_kwargs,
+            )
+            self.deep_thinking_llm = deep_client.get_llm()
+            self.quick_thinking_llm = quick_client.get_llm()
 
-        self.deep_thinking_llm = deep_client.get_llm()
-        self.quick_thinking_llm = quick_client.get_llm()
-        
         self.memory_log = TradingMemoryLog(self.config)
 
         # Create tool nodes
@@ -114,6 +118,7 @@ class TradingAgentsGraph:
             self.deep_thinking_llm,
             self.tool_nodes,
             self.conditional_logic,
+            llm_by_role=self.llm_by_role,
         )
 
         self.propagator = Propagator(
@@ -290,6 +295,26 @@ class TradingAgentsGraph:
 
         if updates:
             self.memory_log.batch_update_with_outcomes(updates)
+            if self.config.get("learned_rules_enabled", True):
+                from tradingagents.agents.utils.learned_rules_log import (
+                    maybe_extend_learned_rules_from_outcome,
+                )
+
+                for u in updates:
+                    try:
+                        maybe_extend_learned_rules_from_outcome(
+                            self.config,
+                            self.quick_thinking_llm,
+                            u,
+                            benchmark,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "learned-rules extension failed for %s %s",
+                            u.get("ticker"),
+                            u.get("trade_date"),
+                            exc_info=True,
+                        )
 
     def propagate(self, company_name, trade_date):
         """Run the trading agents graph for a company on a specific date.
@@ -378,6 +403,47 @@ class TradingAgentsGraph:
             trade_date=trade_date,
             final_trade_decision=final_state["final_trade_decision"],
         )
+
+        notify_url = (self.config.get("analysis_webhook_url") or "").strip()
+        if notify_url:
+            try:
+                from tradingagents.advisor.notify import send_webhook
+
+                decision_text = str(final_state.get("final_trade_decision") or "")
+                rating = parse_rating(decision_text)
+                headline = (
+                    f"Advisory plan — {company_name} — {trade_date} — {rating}\n"
+                    f"(not a trade; for your review)"
+                )
+                body = f"{headline}\n\n{decision_text[:12000]}"
+                send_webhook(notify_url, body)
+            except Exception as e:
+                logger.warning("analysis_webhook_url POST failed: %s", e)
+
+        try:
+            from tradingagents.advisor.email_notify import (
+                analysis_smtp_ready,
+                send_analysis_advisory_email,
+            )
+
+            decision_text = str(final_state.get("final_trade_decision") or "")
+            if analysis_smtp_ready(self.config):
+                rating = parse_rating(decision_text)
+                ok = send_analysis_advisory_email(
+                    self.config,
+                    ticker=company_name,
+                    trade_date=str(trade_date),
+                    decision_text=decision_text,
+                    rating=rating,
+                )
+                if not ok:
+                    logger.warning(
+                        "analysis advisory email not sent for %s %s",
+                        company_name,
+                        trade_date,
+                    )
+        except Exception as e:
+            logger.warning("analysis advisory email path failed: %s", e)
 
         # Clear checkpoint on successful completion to avoid stale state.
         if self.config.get("checkpoint_enabled"):
