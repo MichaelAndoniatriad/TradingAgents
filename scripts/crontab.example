@@ -1,0 +1,20 @@
+# Example crontab entries (run: crontab -e)
+# Replace /ABS/PATH/TradingAgents-main with your real project path.
+# Ensure: sh /ABS/PATH/TradingAgents-main/scripts/setup-venv.sh  (once)
+# and .env contains API keys + TRADINGAGENTS_CLERK_WEBHOOK_URL if you want Slack/email webhooks.
+
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+
+# Daily morning clerk (7:00) — tickers from eToro; optional deep research when triggers hit
+CLERK_MODE=etoro
+CLERK_DEEP_RESEARCH=
+0 7 * * * /ABS/PATH/TradingAgents-main/scripts/cron-clerk-morning.sh
+
+# Weekly roll-up (Sunday 8:00) with LLM summary
+0 8 * * SUN /ABS/PATH/TradingAgents-main/scripts/cron-clerk-weekly.sh
+
+# Optional: same clerk but from a JSON watchlist instead of eToro
+# CLERK_MODE=watchlist
+# CLERK_WATCHLIST=/ABS/PATH/TradingAgents-main/cli/static/clerk_watchlist.example.json
+# 15 7 * * * /ABS/PATH/TradingAgents-main/scripts/cron-clerk-morning.sh
