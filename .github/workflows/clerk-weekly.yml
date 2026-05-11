@@ -1,0 +1,57 @@
+# Weekly clerk roll-up on GitHub-hosted runners (laptop can be closed).
+#
+# Uses the same persisted cache as clerk-morning.yml so digests accumulate.
+# Required secrets: same as clerk-morning (OPENROUTER for weekly LLM summary).
+#
+# Optional repository Variables:
+#   CLERK_WEEKLY_NO_LLM = true   (skip the weekly LLM narrative)
+#
+# Cron is UTC (Sunday 13:00 UTC here — adjust for your weekend preference).
+name: Clerk weekly
+
+on:
+  schedule:
+    - cron: "0 13 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: clerk-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  weekly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TRADINGAGENTS_CACHE_DIR: ${{ github.workspace }}/.ga-cache/cache
+      TRADINGAGENTS_RESULTS_DIR: ${{ github.workspace }}/.ga-cache/results
+      TRADINGAGENTS_LLM_PROVIDER: openrouter
+      TRADINGAGENTS_LLM_BACKEND_URL: https://openrouter.ai/api/v1
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      TRADINGAGENTS_CLERK_WEBHOOK_URL: ${{ secrets.TRADINGAGENTS_CLERK_WEBHOOK_URL }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: .ga-cache
+          key: clerk-state-${{ github.repository }}-v1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install package
+        run: python -m pip install -U pip && python -m pip install -e .
+
+      - name: Clerk weekly
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARGS=(clerk weekly --days 7)
+          if [ "${{ vars.CLERK_WEEKLY_NO_LLM }}" = "true" ]; then
+            ARGS+=(--no-llm)
+          fi
+          tradingagents "${ARGS[@]}"

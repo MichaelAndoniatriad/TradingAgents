@@ -1,4 +1,6 @@
 # Example crontab entries (run: crontab -e)
+# For runs while the laptop is closed, use cloud scheduling instead (see
+# .github/workflows/clerk-morning.yml and clerk-weekly.yml) or a small VPS + these scripts.
 # Replace /ABS/PATH/TradingAgents-main with your real project path.
 # Ensure: sh /ABS/PATH/TradingAgents-main/scripts/setup-venv.sh  (once)
 # and .env contains API keys + TRADINGAGENTS_CLERK_WEBHOOK_URL if you want Slack/email webhooks.

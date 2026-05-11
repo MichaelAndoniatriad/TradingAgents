@@ -1,0 +1,74 @@
+# Runs the morning clerk on GitHub-hosted runners (works while your Mac is asleep).
+#
+# Required repository Secrets (Settings → Secrets and variables → Actions):
+#   OPENROUTER_API_KEY
+#   ETORO_API_KEY
+#   ETORO_USER_KEY
+# Optional:
+#   TRADINGAGENTS_CLERK_WEBHOOK_URL   (Slack / Discord / etc.)
+#   ALPHA_VANTAGE_API_KEY             (only if deep research touches Alpha Vantage)
+#
+# Optional repository Variables:
+#   CLERK_DEEP_RESEARCH = true        (adds --deep-research on scheduled runs; costs API $)
+#
+# Cron is UTC. Example: 12:30 UTC ≈ 07:30 US Eastern (STD). Adjust as needed.
+# Note: eToro’s API may reject requests from some cloud/datacenter IPs; if login fails,
+# use local cron/launchd instead, or a small VPS with a residential/stable IP.
+name: Clerk morning
+
+on:
+  schedule:
+    - cron: "30 12 * * *"
+  workflow_dispatch:
+    inputs:
+      deep_research:
+        description: "Run full graph when triggers fire (API cost)"
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: clerk-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  morning:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TRADINGAGENTS_CACHE_DIR: ${{ github.workspace }}/.ga-cache/cache
+      TRADINGAGENTS_RESULTS_DIR: ${{ github.workspace }}/.ga-cache/results
+      TRADINGAGENTS_LLM_PROVIDER: openrouter
+      TRADINGAGENTS_LLM_BACKEND_URL: https://openrouter.ai/api/v1
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      ETORO_API_KEY: ${{ secrets.ETORO_API_KEY }}
+      ETORO_USER_KEY: ${{ secrets.ETORO_USER_KEY }}
+      TRADINGAGENTS_CLERK_WEBHOOK_URL: ${{ secrets.TRADINGAGENTS_CLERK_WEBHOOK_URL }}
+      ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: .ga-cache
+          key: clerk-state-${{ github.repository }}-v1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install package
+        run: python -m pip install -U pip && python -m pip install -e .
+
+      - name: Clerk morning (eToro watchlist)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARGS=(clerk morning --etoro)
+          if [ "${{ github.event.inputs.deep_research }}" = "true" ] \
+            || [ "${{ vars.CLERK_DEEP_RESEARCH }}" = "true" ]; then
+            ARGS+=(--deep-research)
+          fi
+          tradingagents "${ARGS[@]}"
