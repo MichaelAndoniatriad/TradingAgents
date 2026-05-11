@@ -56,6 +56,19 @@ def instrument_id_from_position(p: dict) -> Optional[int]:
         return None
 
 
+def portfolio_headlines(pnl_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Balance, aggregate unrealized P&L, and open-position count for dashboards."""
+    cp = pnl_payload.get("clientPortfolio") or {}
+    credit = _pick(cp, "credit", "Credit")
+    unreal = _pick(cp, "unrealizedPnL", "unrealizedPnl", "UnrealizedPnL")
+    n_positions = len(dedupe_positions(iter_positions(cp)))
+    return {
+        "credit": credit,
+        "unrealized_pnl": unreal,
+        "open_positions": n_positions,
+    }
+
+
 def summarize_portfolio(
     pnl_payload: Dict[str, Any],
     instrument_meta: Dict[int, Dict[str, Any]],

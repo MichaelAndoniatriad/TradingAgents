@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
+    get_investor_policy_analyst_supplement,
     get_language_instruction,
     get_news,
 )
@@ -159,6 +160,7 @@ Produce a sentiment report covering, in order:
 4. **Catalysts and risks** surfaced by the data.
 5. **Markdown table** at the end summarizing key sentiment signals, their direction, source, and supporting evidence.
 
+{get_investor_policy_analyst_supplement()}
 {get_language_instruction()}"""
 
 

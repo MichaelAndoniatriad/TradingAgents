@@ -68,6 +68,111 @@ def _selected_analysts(side: Dict[str, Any]) -> List[str]:
     return [k for k in ANALYST_ORDER if side.get(f"analyst_{k}", True)]
 
 
+def _etoro_env_configured() -> bool:
+    return bool(
+        (os.environ.get("ETORO_API_KEY") or "").strip()
+        and (os.environ.get("ETORO_USER_KEY") or "").strip()
+    )
+
+
+def _ensure_etoro_snapshot() -> Dict[str, Any]:
+    """Load eToro PnL snapshot once per session; clear ``st.session_state['etoro_snap']`` to refetch."""
+    if not _etoro_env_configured():
+        return {"ok": False, "err": "Set ETORO_API_KEY and ETORO_USER_KEY in `.env`."}
+    if "etoro_snap" in st.session_state:
+        return st.session_state["etoro_snap"]
+    try:
+        from tradingagents.integrations.etoro.client import EtoroClient
+        from tradingagents.integrations.etoro.portfolio import (
+            dedupe_positions,
+            instrument_id_from_position,
+            iter_positions,
+            portfolio_headlines,
+            summarize_portfolio,
+        )
+
+        client = EtoroClient()
+        payload = client.get_portfolio_pnl()
+        cp = payload.get("clientPortfolio") or {}
+        positions = dedupe_positions(iter_positions(cp))
+        ids: List[int] = []
+        for p in positions:
+            iid = instrument_id_from_position(p)
+            if iid is not None:
+                ids.append(iid)
+        meta = client.get_instruments_metadata(ids) if ids else {}
+        text, rows = summarize_portfolio(payload, meta)
+        snap = {
+            "ok": True,
+            "text": text,
+            "rows": rows,
+            "headlines": portfolio_headlines(payload),
+        }
+        st.session_state["etoro_snap"] = snap
+        return snap
+    except Exception as e:
+        err = {"ok": False, "err": str(e)}
+        st.session_state["etoro_snap"] = err
+        return err
+
+
+def _render_etoro_portfolio_block(*, show_export: bool) -> None:
+    """Balances + positions table (cached). Used on the main dashboard and on the eToro page."""
+    if not _etoro_env_configured():
+        return
+
+    top, btn = st.columns([6, 1])
+    with top:
+        st.markdown("##### My eToro portfolio (read-only)")
+    with btn:
+        if st.button("Refresh", key=f"etoro_snap_refresh_{show_export}", help="Reload from eToro API"):
+            st.session_state.pop("etoro_snap", None)
+            st.rerun()
+
+    snap = _ensure_etoro_snapshot()
+    if not snap.get("ok"):
+        st.warning(snap.get("err") or "Could not load eToro portfolio.")
+        return
+
+    hl = snap.get("headlines") or {}
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Available balance", str(hl.get("credit") if hl.get("credit") is not None else "—"))
+    m2.metric("Unrealized P&L (agg.)", str(hl.get("unrealized_pnl") if hl.get("unrealized_pnl") is not None else "—"))
+    m3.metric("Open positions", str(hl.get("open_positions", "—")))
+
+    with st.expander("Position details", expanded=bool(show_export)):
+        st.dataframe(snap.get("rows") or [], use_container_width=True, hide_index=True)
+        st.text(snap.get("text") or "")
+
+    if show_export:
+        st.divider()
+        st.markdown("### Export clerk watchlist JSON from open positions")
+        out_path = st.text_input(
+            "Output file path",
+            value=str(PROJECT_ROOT / "etoro_watchlist.generated.json"),
+            key="etoro_out_path",
+        )
+        trig_path = st.text_input(
+            "Optional triggers template JSON path",
+            value="",
+            key="etoro_trig_path",
+        )
+        if st.button("Export watchlist", key="etoro_export_btn"):
+            try:
+                from tradingagents.integrations.etoro.clerk_bridge import (
+                    fetch_clerk_watchlist_from_etoro,
+                )
+
+                tpl = Path(trig_path.strip()) if trig_path.strip() else None
+                wl = fetch_clerk_watchlist_from_etoro(tpl)
+                outp = Path(out_path.strip())
+                outp.parent.mkdir(parents=True, exist_ok=True)
+                outp.write_text(json.dumps(wl.to_json_dict(), indent=2), encoding="utf-8")
+                st.success(f"Wrote {outp.resolve()}\nTickers: {', '.join(wl.tickers)}")
+            except Exception as e:
+                st.error(str(e))
+
+
 def _render_results(final_state: Dict[str, Any], decision: Any) -> None:
     st.subheader("Final signal (processed)")
     st.code(str(decision), language="text")
@@ -331,53 +436,16 @@ def _page_clerk() -> None:
 
 def _page_etoro() -> None:
     st.subheader("eToro (read-only)")
-    st.markdown("Needs `ETORO_API_KEY` and `ETORO_USER_KEY` in `.env`. Does not place trades.")
-
-    if st.button("Fetch portfolio snapshot", use_container_width=True):
-        try:
-            from tradingagents.integrations.etoro.client import EtoroClient
-            from tradingagents.integrations.etoro.portfolio import (
-                dedupe_positions,
-                instrument_id_from_position,
-                iter_positions,
-                summarize_portfolio,
-            )
-
-            client = EtoroClient()
-            payload = client.get_portfolio_pnl()
-            cp = payload.get("clientPortfolio") or {}
-            positions = dedupe_positions(iter_positions(cp))
-            ids: List[int] = []
-            for p in positions:
-                iid = instrument_id_from_position(p)
-                if iid is not None:
-                    ids.append(iid)
-            meta = client.get_instruments_metadata(ids) if ids else {}
-            text, rows = summarize_portfolio(payload, meta)
-            st.text(text)
-            st.dataframe(rows, use_container_width=True)
-        except Exception as e:
-            st.error(str(e))
-
-    st.divider()
-    st.markdown("### Export clerk watchlist JSON from open positions")
-    out_path = st.text_input(
-        "Output file path",
-        value=str(PROJECT_ROOT / "etoro_watchlist.generated.json"),
+    st.markdown(
+        "Uses your [eToro Public API](https://www.etoro.com/trading/api/) keys from `.env`. "
+        "Loads automatically when keys are set. Does **not** place trades."
     )
-    trig_path = st.text_input("Optional triggers template JSON path", value="")
-    if st.button("Export watchlist", use_container_width=True):
-        try:
-            from tradingagents.integrations.etoro.clerk_bridge import fetch_clerk_watchlist_from_etoro
-
-            tpl = Path(trig_path.strip()) if trig_path.strip() else None
-            wl = fetch_clerk_watchlist_from_etoro(tpl)
-            outp = Path(out_path.strip())
-            outp.parent.mkdir(parents=True, exist_ok=True)
-            outp.write_text(json.dumps(wl.to_json_dict(), indent=2), encoding="utf-8")
-            st.success(f"Wrote {outp.resolve()}\nTickers: {', '.join(wl.tickers)}")
-        except Exception as e:
-            st.error(str(e))
+    if not _etoro_env_configured():
+        st.info(
+            "Add **`ETORO_API_KEY`** and **`ETORO_USER_KEY`** to `.env` "
+            "(eToro → Settings → Trading → API Key Management)."
+        )
+    _render_etoro_portfolio_block(show_export=True)
 
 
 def main() -> None:
@@ -396,6 +464,14 @@ def main() -> None:
         label_visibility="collapsed",
     )
     st.divider()
+
+    if _etoro_env_configured() and page != "eToro":
+        _render_etoro_portfolio_block(show_export=False)
+        st.divider()
+    elif not _etoro_env_configured():
+        st.caption(
+            "eToro: set **`ETORO_API_KEY`** and **`ETORO_USER_KEY`** in `.env` to show your live balances and open positions on this dashboard."
+        )
 
     if page == "Full analysis":
         _page_full_analysis()

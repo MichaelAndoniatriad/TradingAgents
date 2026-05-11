@@ -85,7 +85,10 @@ class ResearchPlan(BaseModel):
     strategic_actions: str = Field(
         description=(
             "Concrete steps for the trader to implement the recommendation, "
-            "including position sizing guidance consistent with the rating."
+            "including position sizing: start with half the intended allocation, "
+            "add the remainder over 2–4 weeks if the thesis confirms, cap new "
+            "risk at roughly 5% of portfolio per name, average up not down, and "
+            "list 2–3 measurable thesis-break metrics to monitor."
         ),
     )
 
@@ -134,7 +137,11 @@ class TraderProposal(BaseModel):
     )
     position_sizing: Optional[str] = Field(
         default=None,
-        description="Optional sizing guidance, e.g. '5% of portfolio'.",
+        description=(
+            "Optional sizing guidance, e.g. '2.5% now, add to 5% over 3 weeks "
+            "if thesis confirms' — must respect the desk cap (~5% per new position) "
+            "and staged entry (half now, half later)."
+        ),
     )
 
 

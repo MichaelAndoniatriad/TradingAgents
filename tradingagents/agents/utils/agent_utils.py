@@ -20,6 +20,25 @@ from tradingagents.agents.utils.news_data_tools import (
 )
 
 
+def get_investor_policy_full_instruction() -> str:
+    """Full exit policy, 10-step framework, and pre-buy checklist for decision agents."""
+    from tradingagents.agents.utils.investor_policy import INVESTOR_POLICY_FULL
+
+    return (
+        "\n\n---\n\n## Mandated portfolio policy (follow strictly)\n\n"
+        + INVESTOR_POLICY_FULL
+    )
+
+
+def get_investor_policy_analyst_supplement() -> str:
+    """Short mandate context for market/news/sentiment analysts."""
+    from tradingagents.agents.utils.investor_policy import (
+        INVESTOR_POLICY_ANALYST_SUPPLEMENT,
+    )
+
+    return "\n\n---\n" + INVESTOR_POLICY_ANALYST_SUPPLEMENT
+
+
 def get_language_instruction() -> str:
     """Return a prompt instruction for the configured output language.
 

@@ -7,6 +7,7 @@ from tradingagents.integrations.etoro.clerk_bridge import _normalize_ticker
 from tradingagents.integrations.etoro.portfolio import (
     dedupe_positions,
     iter_positions,
+    portfolio_headlines,
     summarize_portfolio,
 )
 
@@ -24,6 +25,13 @@ def test_dedupe_mirror_positions():
     assert len(raw) == 3
     deduped = dedupe_positions(raw)
     assert len(deduped) == 2
+
+
+def test_portfolio_headlines():
+    fixture = Path(__file__).parent / "fixtures" / "etoro_pnl_minimal.json"
+    data = json.loads(fixture.read_text(encoding="utf-8"))
+    h = portfolio_headlines(data)
+    assert h["open_positions"] == 2
 
 
 def test_summarize_portfolio():

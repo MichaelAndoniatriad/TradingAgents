@@ -13,6 +13,7 @@ from __future__ import annotations
 from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
+    get_investor_policy_full_instruction,
     get_language_instruction,
 )
 from tradingagents.agents.utils.structured import (
@@ -61,7 +62,9 @@ def create_portfolio_manager(llm):
 
 ---
 
-Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}"""
+Be decisive and ground every conclusion in specific evidence from the analysts.
+Your executive summary must state 2–3 concrete thesis-break metrics for Notes (as required below) whenever a Buy or Overweight is justified; tie partial exits and trims to the exit policy when relevant.
+{get_investor_policy_full_instruction()}{get_language_instruction()}"""
 
         final_trade_decision = invoke_structured_or_freetext(
             structured_llm,
