@@ -1,0 +1,39 @@
+{
+  "clientPortfolio": {
+    "credit": 5000,
+    "unrealizedPnL": 12.5,
+    "positions": [
+      {
+        "positionId": 1,
+        "instrumentId": 101,
+        "isBuy": true,
+        "openRate": 100.0,
+        "units": 2,
+        "pnL": 5
+      }
+    ],
+    "mirrors": [
+      {
+        "mirrorId": 9,
+        "positions": [
+          {
+            "positionId": 1,
+            "instrumentId": 101,
+            "isBuy": true,
+            "openRate": 100.0,
+            "units": 2,
+            "pnL": 5
+          },
+          {
+            "positionId": 2,
+            "instrumentId": 202,
+            "isBuy": false,
+            "openRate": 50.0,
+            "units": 1,
+            "pnL": -1
+          }
+        ]
+      }
+    ]
+  }
+}

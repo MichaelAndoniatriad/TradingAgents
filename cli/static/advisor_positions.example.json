@@ -1,0 +1,15 @@
+{
+  "positions": [
+    {
+      "ticker": "NVDA",
+      "entry_price": 120.0,
+      "next_earnings_date": "2026-05-28",
+      "fetch_earnings_from_yfinance": true,
+      "thesis_break_metrics": [
+        "Data center revenue YoY growth stays above 50%",
+        "Gross margin does not compress more than 2pp vs prior year"
+      ],
+      "notes": "AI infrastructure leader; binding exit rules handled by advisor CLI."
+    }
+  ]
+}

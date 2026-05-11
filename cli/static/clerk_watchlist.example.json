@@ -1,0 +1,11 @@
+{
+  "tickers": ["NVDA", "MSFT"],
+  "output_language": "English",
+  "deep_research_analysts": ["news", "fundamentals"],
+  "triggers": {
+    "deep_research_on_new_headlines": true,
+    "deep_research_earnings_within_days": 5,
+    "deep_research_keyword_hits": ["guidance", "SEC", "investigation", "recall"],
+    "use_llm_materiality_gate": false
+  }
+}

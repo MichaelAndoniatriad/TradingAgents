@@ -1,0 +1,6 @@
+[browser]
+gatherUsageStats = false
+
+[server]
+# Bind only on this machine (default). Change to 0.0.0.0 only if you need LAN access.
+address = "127.0.0.1"
