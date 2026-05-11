@@ -20,14 +20,29 @@ from tradingagents.agents.utils.news_data_tools import (
 )
 
 
+def _learned_rules_excerpt_for_prompt(max_chars: int = 6000) -> str:
+    from tradingagents.dataflows.config import get_config
+    from tradingagents.agents.utils.learned_rules_log import read_learned_rules_excerpt
+
+    return read_learned_rules_excerpt(get_config(), max_chars=max_chars).strip()
+
+
 def get_investor_policy_full_instruction() -> str:
     """Full exit policy, 10-step framework, and pre-buy checklist for decision agents."""
     from tradingagents.agents.utils.investor_policy import INVESTOR_POLICY_FULL
 
-    return (
+    base = (
         "\n\n---\n\n## Mandated portfolio policy (follow strictly)\n\n"
         + INVESTOR_POLICY_FULL
     )
+    learned = _learned_rules_excerpt_for_prompt(max_chars=6000)
+    if learned:
+        base += (
+            "\n\n---\n\n## Learned rules from past outcomes "
+            "(append-only log; apply when consistent with policy above)\n\n"
+            + learned
+        )
+    return base
 
 
 def get_investor_policy_analyst_supplement() -> str:
@@ -36,7 +51,15 @@ def get_investor_policy_analyst_supplement() -> str:
         INVESTOR_POLICY_ANALYST_SUPPLEMENT,
     )
 
-    return "\n\n---\n" + INVESTOR_POLICY_ANALYST_SUPPLEMENT
+    tail = _learned_rules_excerpt_for_prompt(max_chars=900)
+    extra = ""
+    if tail:
+        extra = (
+            "\n\n**Desk habits learned from past runs (trimmed):** "
+            + tail[:900]
+            + ("…" if len(tail) > 900 else "")
+        )
+    return "\n\n---\n" + INVESTOR_POLICY_ANALYST_SUPPLEMENT + extra
 
 
 def get_language_instruction() -> str:

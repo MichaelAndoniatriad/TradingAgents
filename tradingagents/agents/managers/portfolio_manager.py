@@ -40,18 +40,20 @@ def create_portfolio_manager(llm):
             else ""
         )
 
-        prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
+        prompt = f"""You are the Portfolio Manager for a **single-name** advisory workflow.
+
+**Critical scope:** You do **not** execute trades, connect to a broker, or place orders. Your output is a **written plan** for the human: what stance to consider (Buy / Overweight / Hold / Underweight / Sell), how confident the evidence is, how to think about the name emotionally in a disciplined way, and what would change that view. The analysts and debate above are **inputs** you judge — not instructions to auto-trade.
 
 {instrument_context}
 
 ---
 
-**Rating Scale** (use exactly one):
-- **Buy**: Strong conviction to enter or add to position
-- **Overweight**: Favorable outlook, gradually increase exposure
-- **Hold**: Maintain current position, no action needed
-- **Underweight**: Reduce exposure, take partial profits
-- **Sell**: Exit position or avoid entry
+**Advisory rating scale** (pick exactly one for the human's planning):
+- **Buy**: Strong conviction to consider entering or adding (on their own timeline)
+- **Overweight**: Favorable outlook; consider gradually increasing exposure
+- **Hold**: Balanced or wait; no urgency to change sizing
+- **Underweight**: Consider trimming or taking profits
+- **Sell**: Consider full exit or avoiding new entry
 
 **Context:**
 - Research Manager's investment plan: **{research_plan}**
@@ -63,6 +65,9 @@ def create_portfolio_manager(llm):
 ---
 
 Be decisive and ground every conclusion in specific evidence from the analysts.
+Set **confidence** honestly from debate quality and data thickness.
+In **investor_framing**, speak directly to the reader: calm, specific, no hype — how they should *feel* about uncertainty (patient monitoring vs genuine red flags).
+If past lessons give a baseline, use **stance_vs_prior** to note what changed or stayed the same; otherwise leave it null.
 Your executive summary must state 2–3 concrete thesis-break metrics for Notes (as required below) whenever a Buy or Overweight is justified; tie partial exits and trims to the exit policy when relevant.
 {get_investor_policy_full_instruction()}{get_language_instruction()}"""
 

@@ -225,28 +225,39 @@ def get_known_models() -> Dict[str, List[str]]:
 # Corporate hierarchy — OpenRouter-only routing (edit in default_config /
 # Streamlit settings via ``agent_llm_routing``; not env-overridable).
 # Model IDs are OpenRouter slugs (``upstream/model``).
+#
+# Tiering: data layer (speed/cost) → strategy (adversarial + R1 synthesis) →
+# risk (policy / V4 Pro) → executive (Sonnet RM on long reports, GPT-5.5 PM).
 # ---------------------------------------------------------------------------
 
-OR_DEEPSEEK_FLASH = "deepseek/deepseek-chat"
+# Data layer — low complexity, high volume
+OR_DEEPSEEK_V4_FLASH = "deepseek/deepseek-v4-flash"
+OR_GEMINI_15_FLASH = "google/gemini-flash-1.5"  # 1M+ context for bulk news
+
+# Strategy layer
 OR_DEEPSEEK_R1 = "deepseek/deepseek-r1"
-OR_GEMINI_FLASH = "google/gemini-2.0-flash-001"
 OR_CLAUDE_SONNET = "anthropic/claude-3.5-sonnet"
-OR_OPENAI_EXEC = "openai/gpt-4o"
-OR_OPENAI_VAULT = "openai/o1-mini"
+
+# Risk layer
+OR_DEEPSEEK_V4_PRO = "deepseek/deepseek-v4-pro"
+
+# Executive layer (override via ``agent_llm_routing``).
+OR_CLAUDE_SONNET_4_6 = "anthropic/claude-sonnet-4.6"
+OR_GPT_55 = "openai/gpt-5.5"
 
 # ``provider`` is always ``openrouter`` (enforced in corporate_llm_factory).
 DEFAULT_CORPORATE_AGENT_ROUTING: Dict[str, Dict[str, Any]] = {
-    "market_analyst": {"provider": "openrouter", "model": OR_DEEPSEEK_FLASH},
-    "sentiment_analyst": {"provider": "openrouter", "model": OR_DEEPSEEK_FLASH},
-    "fundamentals_analyst": {"provider": "openrouter", "model": OR_DEEPSEEK_FLASH},
-    "news_analyst": {"provider": "openrouter", "model": OR_GEMINI_FLASH},
+    "market_analyst": {"provider": "openrouter", "model": OR_DEEPSEEK_V4_FLASH},
+    "sentiment_analyst": {"provider": "openrouter", "model": OR_DEEPSEEK_V4_FLASH},
+    "fundamentals_analyst": {"provider": "openrouter", "model": OR_DEEPSEEK_V4_FLASH},
+    "news_analyst": {"provider": "openrouter", "model": OR_GEMINI_15_FLASH},
     "bull_researcher": {"provider": "openrouter", "model": OR_CLAUDE_SONNET},
     "bear_researcher": {"provider": "openrouter", "model": OR_CLAUDE_SONNET},
     "trader": {"provider": "openrouter", "model": OR_DEEPSEEK_R1},
-    "risk_aggressive": {"provider": "openrouter", "model": OR_OPENAI_EXEC},
-    "risk_neutral": {"provider": "openrouter", "model": OR_OPENAI_EXEC},
-    "risk_conservative": {"provider": "openrouter", "model": OR_OPENAI_EXEC},
-    "research_manager": {"provider": "openrouter", "model": OR_OPENAI_EXEC},
-    "portfolio_manager": {"provider": "openrouter", "model": OR_OPENAI_VAULT},
-    "reflection": {"provider": "openrouter", "model": OR_DEEPSEEK_FLASH},
+    "risk_aggressive": {"provider": "openrouter", "model": OR_DEEPSEEK_V4_PRO},
+    "risk_neutral": {"provider": "openrouter", "model": OR_DEEPSEEK_V4_PRO},
+    "risk_conservative": {"provider": "openrouter", "model": OR_DEEPSEEK_V4_PRO},
+    "research_manager": {"provider": "openrouter", "model": OR_CLAUDE_SONNET_4_6},
+    "portfolio_manager": {"provider": "openrouter", "model": OR_GPT_55},
+    "reflection": {"provider": "openrouter", "model": OR_DEEPSEEK_V4_FLASH},
 }

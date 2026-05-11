@@ -51,21 +51,35 @@ def generate_llm_digest(
     rule_digest_text: str,
     config: "Dict[str, Any] | None" = None,
 ) -> str:
-    """Single quick-model call for a narrative layer on top of deterministic rules."""
+    """LLM narrative on top of deterministic rules.
+
+    Uses ``portfolio_advisor_reasoning_model`` when any alert is CRITICAL and that
+    model is configured; otherwise the quick model (cost-aware routing).
+    """
     cfg = (config or DEFAULT_CONFIG).copy()
     kwargs = {}
-    provider = (cfg.get("llm_provider") or "openai").lower()
+    has_critical = any(str(a.severity).lower() == "critical" for a in alerts)
+    reasoning_m = (cfg.get("portfolio_advisor_reasoning_model") or "").strip()
+    if has_critical and reasoning_m:
+        model = reasoning_m
+        provider = "openrouter" if "/" in model else (cfg.get("llm_provider") or "openrouter").lower()
+        base_url = cfg.get("corporate_openrouter_base_url") or cfg.get("backend_url")
+    else:
+        model = (cfg.get("quick_think_llm") or "gpt-5.4-mini").strip()
+        provider = (cfg.get("llm_provider") or "openai").lower()
+        base_url = cfg.get("backend_url")
+
     if provider == "google" and cfg.get("google_thinking_level"):
         kwargs["thinking_level"] = cfg["google_thinking_level"]
-    if provider == "openai" and cfg.get("openai_reasoning_effort"):
+    if provider in ("openai", "openrouter", "deepseek", "xai") and cfg.get("openai_reasoning_effort"):
         kwargs["reasoning_effort"] = cfg["openai_reasoning_effort"]
     if provider == "anthropic" and cfg.get("anthropic_effort"):
         kwargs["effort"] = cfg["anthropic_effort"]
 
     client = create_llm_client(
         provider=provider,
-        model=cfg.get("quick_think_llm", "gpt-5.4-mini"),
-        base_url=cfg.get("backend_url"),
+        model=model,
+        base_url=base_url,
         **kwargs,
     )
     llm = client.get_llm()

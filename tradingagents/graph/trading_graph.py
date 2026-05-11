@@ -356,8 +356,31 @@ class TradingAgentsGraph:
 
     def _run_graph(self, company_name, trade_date):
         """Execute the graph and write the resulting state to disk and memory log."""
-        # Initialize state — inject memory log context for PM.
-        past_context = self.memory_log.get_past_context(company_name)
+        # Initialize state — inject markdown memory + JSONL event tail for PM.
+        lb = self.config.get("memory_context_lookback_days")
+        try:
+            lb_i = int(lb) if lb is not None else None
+        except (TypeError, ValueError):
+            lb_i = None
+        mx_s = int(self.config.get("memory_context_max_same_ticker", 8))
+        mx_c = int(self.config.get("memory_context_max_cross_ticker", 3))
+        past_md = self.memory_log.get_past_context(
+            company_name, mx_s, mx_c, lookback_days=lb_i
+        )
+        from tradingagents.agents.utils.event_log import format_recent_events_for_ticker
+
+        try:
+            ev_days = int(self.config.get("memory_event_log_prompt_days", 30))
+        except (TypeError, ValueError):
+            ev_days = 30
+        past_ev = ""
+        try:
+            past_ev = format_recent_events_for_ticker(
+                self.config, company_name, days=ev_days, max_events=25
+            )
+        except Exception:
+            logger.debug("event log prompt tail skipped", exc_info=True)
+        past_context = "\n\n".join(x for x in (past_md, past_ev) if (x or "").strip())
         init_agent_state = self.propagator.create_initial_state(
             company_name, trade_date, past_context=past_context
         )
@@ -404,19 +427,41 @@ class TradingAgentsGraph:
             final_trade_decision=final_state["final_trade_decision"],
         )
 
+        decision_text = str(final_state.get("final_trade_decision") or "")
+        rating = parse_rating(decision_text)
+        try:
+            from tradingagents.agents.utils.event_log import append_event
+
+            append_event(
+                self.config,
+                {
+                    "ticker": company_name,
+                    "event_type": "full_graph_decision",
+                    "key_data": {"trade_date": str(trade_date), "rating": rating},
+                    "outcome": None,
+                },
+            )
+        except Exception:
+            logger.debug("event log append skipped", exc_info=True)
+
         notify_url = (self.config.get("analysis_webhook_url") or "").strip()
+        suppress_hold = bool(self.config.get("analysis_notify_suppress_hold"))
+
         if notify_url:
             try:
                 from tradingagents.advisor.notify import send_webhook
 
-                decision_text = str(final_state.get("final_trade_decision") or "")
-                rating = parse_rating(decision_text)
-                headline = (
-                    f"Advisory plan — {company_name} — {trade_date} — {rating}\n"
-                    f"(not a trade; for your review)"
-                )
-                body = f"{headline}\n\n{decision_text[:12000]}"
-                send_webhook(notify_url, body)
+                if suppress_hold and rating == "Hold":
+                    logger.info(
+                        "analysis_webhook skipped (Hold rating; analysis_notify_suppress_hold)"
+                    )
+                else:
+                    headline = (
+                        f"Advisory plan — {company_name} — {trade_date} — {rating}\n"
+                        f"(not a trade; for your review)"
+                    )
+                    body = f"{headline}\n\n{decision_text[:12000]}"
+                    send_webhook(notify_url, body)
             except Exception as e:
                 logger.warning("analysis_webhook_url POST failed: %s", e)
 
@@ -426,22 +471,25 @@ class TradingAgentsGraph:
                 send_analysis_advisory_email,
             )
 
-            decision_text = str(final_state.get("final_trade_decision") or "")
             if analysis_smtp_ready(self.config):
-                rating = parse_rating(decision_text)
-                ok = send_analysis_advisory_email(
-                    self.config,
-                    ticker=company_name,
-                    trade_date=str(trade_date),
-                    decision_text=decision_text,
-                    rating=rating,
-                )
-                if not ok:
-                    logger.warning(
-                        "analysis advisory email not sent for %s %s",
-                        company_name,
-                        trade_date,
+                if suppress_hold and rating == "Hold":
+                    logger.info(
+                        "analysis advisory email skipped (Hold rating; analysis_notify_suppress_hold)"
                     )
+                else:
+                    ok = send_analysis_advisory_email(
+                        self.config,
+                        ticker=company_name,
+                        trade_date=str(trade_date),
+                        decision_text=decision_text,
+                        rating=rating,
+                    )
+                    if not ok:
+                        logger.warning(
+                            "analysis advisory email not sent for %s %s",
+                            company_name,
+                            trade_date,
+                        )
         except Exception as e:
             logger.warning("analysis advisory email path failed: %s", e)
 

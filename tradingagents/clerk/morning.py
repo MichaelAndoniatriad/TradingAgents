@@ -9,8 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from tradingagents.default_config import DEFAULT_CONFIG
 
-from tradingagents.clerk.deep_runner import run_deep_research, save_deep_report
 from tradingagents.clerk.news_scan import fetch_yfinance_news, format_headlines_for_digest, _fingerprint
+from tradingagents.clerk.portfolio_digest import build_daily_portfolio_markdown
 from tradingagents.clerk.notify import get_clerk_webhook_url, post_text
 from tradingagents.clerk.state import ClerkStateStore
 from tradingagents.clerk.triggers import collect_deep_research_reasons
@@ -31,11 +31,13 @@ def run_morning_clerk(
     deep_research: bool = False,
     config: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, List[str]]:
-    """Daily lightweight scan. Returns (digest_markdown, tickers_that_ran_deep).
+    """Daily digest: eToro book snapshot + headline news per ticker.
 
-    First time a ticker appears, fingerprints are recorded and **no** deep
-    research fires (baseline pass). After that, deep research runs only when
-    triggers match — never on simple percentage moves.
+    Does **not** run the full multi-agent graph (``deep_research`` is ignored).
+    Deep research is proposed and optionally executed on the **weekly** clerk
+    when triggers warrant it.
+
+    Returns ``(digest_markdown, [])`` for API compatibility (second value unused).
     """
     cfg = (config or DEFAULT_CONFIG).copy()
     wl = (
@@ -56,10 +58,24 @@ def run_morning_clerk(
     lines: List[str] = [
         f"# Clerk — morning scan ({td})",
         "",
-        "Automated digest (no intraday agent loop). Deep multi-agent research runs **only** when a trigger matches.",
+        "**Daily scope:** overnight-style **portfolio snapshot** (when eToro keys are set) "
+        "+ **recent headlines** for each watchlist ticker. "
+        "Trigger hints are listed for transparency; **deep research is scheduled from the weekly job**, not here.",
         "",
     ]
-    deep_tickers: List[str] = []
+
+    pf_block, _used_etoro = build_daily_portfolio_markdown(
+        cache_dir=Path(cfg["data_cache_dir"]),
+        trade_date=td,
+    )
+    lines.append(pf_block)
+    lines.append("---")
+    lines.append("")
+
+    if deep_research:
+        logger.warning(
+            "run_morning_clerk(..., deep_research=True) is ignored — use `clerk weekly --execute-deep-queue`."
+        )
 
     for ticker in wl.tickers:
         items = fetch_yfinance_news(ticker, limit=25)
@@ -97,9 +113,12 @@ def run_morning_clerk(
         lines.append("")
 
         if reasons:
-            lines.append(f"**Deep-research triggers:** {', '.join(reasons)}")
+            lines.append(
+                f"**Would queue for weekly deep research:** {', '.join(reasons)} "
+                "(weekly pass decides execution; not auto-run here)."
+            )
         else:
-            lines.append("**Deep-research triggers:** none")
+            lines.append("**Weekly deep-research queue:** no trigger signals from this headline delta.")
         lines.append("")
 
         # Persist seen fingerprints (merge with prior)
@@ -107,27 +126,6 @@ def run_morning_clerk(
         for it in items:
             merged.add(_fingerprint(it))
         store.save_seen(ticker, list(merged))
-
-        if deep_research and reasons:
-            try:
-                final_state, _dec = run_deep_research(
-                    ticker,
-                    td,
-                    wl.deep_research_analysts,
-                    cfg,
-                )
-                report_path = save_deep_report(
-                    results_dir=Path(cfg["results_dir"]),
-                    ticker=ticker,
-                    trade_date=td,
-                    final_state=final_state,
-                )
-                lines.append(f"→ Ran deep research; saved: `{report_path}`")
-                deep_tickers.append(ticker)
-            except Exception as e:
-                logger.exception("Deep research failed for %s", ticker)
-                lines.append(f"→ **Deep research failed:** {e}")
-            lines.append("")
 
     digest = "\n".join(lines).strip() + "\n"
 
@@ -141,4 +139,4 @@ def run_morning_clerk(
             body = body[:11900] + "\n…(truncated)"
         post_text(url, body)
 
-    return digest, deep_tickers
+    return digest, []

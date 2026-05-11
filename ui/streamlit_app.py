@@ -756,6 +756,26 @@ def _page_portfolio_advisor() -> None:
     due_run = b3.button("Run due jobs", use_container_width=True, key="pa_btn_due")
     status_refresh = b4.button("Refresh status", use_container_width=True, key="pa_btn_status")
 
+    pe_a, pe_b = st.columns([3, 1])
+    pe_ticker = pe_a.text_input(
+        "Post-earnings ticker (one-shot reasoning memo)",
+        "",
+        key="pa_pe_ticker",
+        help="Uses portfolio_advisor_reasoning_model (default DeepSeek R1 on OpenRouter).",
+    )
+    post_earnings_run = pe_b.button("Send post-earnings verdict", use_container_width=True, key="pa_btn_pe")
+
+    st.caption(
+        "Bootstrap runs the **full multi-agent graph** on every holding (high cost). "
+        "Prefer `advisor portfolio run-due` for scheduled work unless you intentionally want a full refresh."
+    )
+    boot_a, boot_b, boot_c = st.columns([2, 1, 1])
+    boot_delay = boot_a.number_input("Delay between tickers (seconds)", min_value=0.0, value=45.0, step=5.0, key="pa_boot_delay")
+    boot_max = boot_b.number_input("Max tickers (0 = all)", min_value=0, value=0, step=1, key="pa_boot_max")
+    boot_confirm = boot_c.checkbox("I understand the cost", value=False, key="pa_boot_confirm")
+    bootstrap_run = st.button("Run portfolio bootstrap (full graph each)", key="pa_btn_bootstrap")
+    memory_review_run = st.button("Run memory review (event log summary)", key="pa_btn_memrev")
+
     try:
         from tradingagents.portfolio_advisor import messaging as pa_messaging
         from tradingagents.portfolio_advisor import service as pa_service
@@ -787,8 +807,36 @@ def _page_portfolio_advisor() -> None:
             st.session_state[_SS_PORT_NOTE] = f"Run-due processed {n} job(s)."
         except Exception as e:
             st.session_state[_SS_PORT_NOTE] = f"Run-due failed: {e}"
+    if post_earnings_run:
+        sym = (pe_ticker or "").strip().upper()
+        if not sym:
+            st.session_state[_SS_PORT_NOTE] = "Enter a ticker for post-earnings."
+        else:
+            try:
+                pa_service.run_post_earnings(cfg, sym)
+                st.session_state[_SS_PORT_NOTE] = f"Post-earnings verdict sent for {sym}."
+            except Exception as e:
+                st.session_state[_SS_PORT_NOTE] = f"Post-earnings failed: {e}"
+    if bootstrap_run:
+        if not boot_confirm:
+            st.session_state[_SS_PORT_NOTE] = "Bootstrap requires the cost confirmation checkbox."
+        else:
+            try:
+                mx = int(boot_max) if boot_max and boot_max > 0 else None
+                pa_service.run_bootstrap(cfg, delay_seconds=float(boot_delay), max_positions=mx)
+                st.session_state[_SS_PORT_NOTE] = "Portfolio bootstrap finished (see email/webhook)."
+            except Exception as e:
+                st.session_state[_SS_PORT_NOTE] = f"Bootstrap failed: {e}"
+    if memory_review_run:
+        try:
+            pa_service.run_memory_review(cfg, lookback_days=120)
+            st.session_state[_SS_PORT_NOTE] = "Memory review sent (see email/webhook)."
+        except Exception as e:
+            st.session_state[_SS_PORT_NOTE] = f"Memory review failed: {e}"
 
-    if status_refresh or any([init_run, weekly_run, replan_run, due_run]) or _SS_PORT_STATUS not in st.session_state:
+    if status_refresh or any(
+        [init_run, weekly_run, replan_run, due_run, post_earnings_run, bootstrap_run, memory_review_run]
+    ) or _SS_PORT_STATUS not in st.session_state:
         try:
             st.session_state[_SS_PORT_STATUS] = pa_service.status_text(cfg)
         except Exception as e:

@@ -5,7 +5,11 @@ import pandas as pd
 from unittest.mock import MagicMock, patch
 
 from tradingagents.agents.utils.memory import TradingMemoryLog
-from tradingagents.agents.schemas import PortfolioDecision, PortfolioRating
+from tradingagents.agents.schemas import (
+    ConfidenceLevel,
+    PortfolioDecision,
+    PortfolioRating,
+)
 from tradingagents.graph.reflection import Reflector
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.graph.propagation import Propagator
@@ -90,8 +94,10 @@ def _structured_pm_llm(captured: dict, decision: PortfolioDecision | None = None
     if decision is None:
         decision = PortfolioDecision(
             rating=PortfolioRating.HOLD,
+            confidence=ConfidenceLevel.MEDIUM,
             executive_summary="Hold the position; await catalyst.",
             investment_thesis="Balanced view; neither side carried the debate.",
+            investor_framing="Stay measured; wait for a clean catalyst before resizing.",
         )
     structured = MagicMock()
     structured.invoke.side_effect = lambda prompt: (
@@ -645,6 +651,7 @@ class TestDeferredReflection:
         mock_graph.memory_log = log
         mock_graph.reflector = mock_reflector
         mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
+        mock_graph.config = {"learned_rules_enabled": False}
         TradingAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
         assert log.get_pending_entries() == []
         entries = log.load_entries()
@@ -701,8 +708,11 @@ class TestPortfolioManagerInjection:
         captured = {}
         decision = PortfolioDecision(
             rating=PortfolioRating.OVERWEIGHT,
+            confidence=ConfidenceLevel.HIGH,
             executive_summary="Build position gradually over the next two weeks.",
             investment_thesis="AI capex cycle remains intact; institutional flows constructive.",
+            investor_framing="Constructive bias is warranted; still size in tranches and watch capex headlines.",
+            stance_vs_prior="Consistent with prior constructive view; conviction a bit higher on flows.",
             price_target=215.0,
             time_horizon="3-6 months",
         )
@@ -710,9 +720,13 @@ class TestPortfolioManagerInjection:
         pm_node = create_portfolio_manager(llm)
         result = pm_node(_make_pm_state())
         md = result["final_trade_decision"]
+        assert "Advisory only" in md
         assert "**Rating**: Overweight" in md
+        assert "**Confidence**: High" in md
         assert "**Executive Summary**: Build position gradually" in md
         assert "**Investment Thesis**: AI capex cycle" in md
+        assert "**How to think about this**:" in md
+        assert "**Versus prior context**:" in md
         assert "**Price Target**: 215.0" in md
         assert "**Time Horizon**: 3-6 months" in md
 

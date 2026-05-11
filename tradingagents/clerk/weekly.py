@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from langchain_core.messages import HumanMessage
 
@@ -13,6 +13,12 @@ from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.llm_clients import create_llm_client
 
 from tradingagents.clerk.notify import get_clerk_webhook_url, post_text
+from tradingagents.clerk.watchlist import ClerkWatchlist
+from tradingagents.clerk.weekly_queue import (
+    collect_weekly_deep_queue,
+    execute_deep_queue,
+    format_deep_queue_markdown,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +26,7 @@ logger = logging.getLogger(__name__)
 def _collect_daily_digests(cache_dir: Path, days: int = 7) -> str:
     daily = Path(cache_dir) / "clerk" / "daily"
     if not daily.exists():
-        return "(no daily clerk logs yet — run `clerk morning` first)"
+        return "(no archived daily digest files in this window — weekly-only mode is normal)"
     end = date.today()
     want = [(end - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days - 1, -1, -1)]
     parts: List[str] = []
@@ -54,9 +60,10 @@ def _weekly_llm_summary(bundle_text: str, config: Dict[str, Any]) -> str:
     prompt = (
         "You are a portfolio clerk summarizing the past week's automated morning digests.\n"
         "Produce:\n"
-        "1) Three bullets: what mattered most across tickers.\n"
+        "1) Three bullets: what mattered most across tickers and the portfolio snapshot narrative.\n"
         "2) 'Next week watch list': 5 concrete things to monitor (dates, events, metrics).\n"
-        "3) One paragraph on scheduling: when full deep research is likely warranted vs noise.\n"
+        "3) One short paragraph: which queued deep-research names (if any) look highest priority vs "
+        "noise — deep runs are expensive and should stay rare.\n"
         "Keep total under 350 words. No investment advice disclaimers beyond one short line.\n\n"
         "--- Past week digests (may be truncated) ---\n\n"
         f"{bundle_text[:24000]}"
@@ -78,25 +85,69 @@ def _weekly_llm_summary(bundle_text: str, config: Dict[str, Any]) -> str:
 
 def run_weekly_clerk(
     *,
+    watchlist: Optional[Union[Path, ClerkWatchlist]] = None,
     days: int = 7,
     webhook_url: Optional[str] = None,
     with_llm: bool = True,
     config: Optional[Dict[str, Any]] = None,
+    trade_date: Optional[str] = None,
+    execute_deep_queue: bool = False,
+    max_deep: int = 3,
 ) -> str:
-    """Roll up recent morning logs; optional LLM narrative; optional webhook."""
+    """Roll up morning logs; build deep-research queue; optional LLM + optional deep execution."""
     cfg = (config or DEFAULT_CONFIG).copy()
+    td = trade_date or date.today().strftime("%Y-%m-%d")
     bundle = _collect_daily_digests(Path(cfg["data_cache_dir"]), days=days)
+
+    wl: Optional[ClerkWatchlist] = None
+    if isinstance(watchlist, Path):
+        wl = ClerkWatchlist.from_path(watchlist)
+    elif isinstance(watchlist, ClerkWatchlist):
+        wl = watchlist
+
+    queue_block = ""
+    queue_entries: List[Tuple[str, List[str]]] = []
+    deep_done: List[str] = []
+    if wl is not None:
+        queue_entries = collect_weekly_deep_queue(
+            wl,
+            trade_date=td,
+            data_cache_dir=Path(cfg["data_cache_dir"]),
+        )
+        queue_block = "\n" + format_deep_queue_markdown(queue_entries) + "\n"
+        iso_week = date.today().isocalendar()
+        qpath = Path(cfg["data_cache_dir"]) / "clerk" / "weekly" / f"deep_queue_{iso_week[0]}-W{iso_week[1]:02d}.md"
+        qpath.parent.mkdir(parents=True, exist_ok=True)
+        qpath.write_text(queue_block.strip() + "\n", encoding="utf-8")
+
+        if execute_deep_queue and queue_entries:
+            deep_done = execute_deep_queue(
+                queue_entries,
+                trade_date=td,
+                wl=wl,
+                config=cfg,
+                max_deep=max(0, int(max_deep)),
+            )
 
     header = (
         f"# Clerk — weekly roll-up\n\n"
         f"_Generated (UTC): {datetime.utcnow().isoformat()}Z_\n\n"
         f"Window: last {days} day(s) of morning digests.\n\n"
     )
+    bundle_for_llm = bundle + (queue_block if queue_block else "")
     llm_block = ""
     if with_llm:
-        llm_block = "\n## LLM summary\n\n" + _weekly_llm_summary(bundle, cfg) + "\n"
+        llm_block = "\n## LLM summary\n\n" + _weekly_llm_summary(bundle_for_llm, cfg) + "\n"
 
-    digest = header + "## Raw digests (concatenated)\n\n" + bundle + "\n" + llm_block
+    digest = (
+        header
+        + "## Raw digests (concatenated)\n\n"
+        + bundle
+        + "\n"
+        + queue_block
+        + (f"\n## Deep research executed this pass\n\n{', '.join(deep_done)}\n" if deep_done else "")
+        + llm_block
+    )
 
     out_dir = Path(cfg["data_cache_dir"]) / "clerk" / "weekly"
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,47 @@
+# Price only portfolio watchdog (no LLM). Intended cadence: every 5 minutes on
+# US equity session weekdays 13:30 to 20:00 UTC. GitHub cron cannot express that
+# exactly; this workflow runs every 5 minutes Mon to Fri and exits early outside
+# the window unless you dispatch manually.
+#
+# Required secrets: ETORO_API_KEY, ETORO_USER_KEY, plus webhook or SMTP like other advisor jobs.
+name: Advisor watchdog
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * 1-5"
+
+concurrency:
+  group: advisor-watchdog-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install package
+        run: python -m pip install -U pip && python -m pip install -e .
+
+      - name: Run watchdog
+        shell: bash
+        env:
+          ETORO_API_KEY: ${{ secrets.ETORO_API_KEY }}
+          ETORO_USER_KEY: ${{ secrets.ETORO_USER_KEY }}
+          TRADINGAGENTS_ANALYSIS_WEBHOOK_URL: ${{ secrets.TRADINGAGENTS_ANALYSIS_WEBHOOK_URL }}
+          TRADINGAGENTS_ANALYSIS_EMAIL_TO: ${{ secrets.TRADINGAGENTS_ANALYSIS_EMAIL_TO }}
+          TRADINGAGENTS_ANALYSIS_EMAIL_FROM: ${{ secrets.TRADINGAGENTS_ANALYSIS_EMAIL_FROM }}
+          TRADINGAGENTS_SMTP_HOST: ${{ secrets.TRADINGAGENTS_SMTP_HOST }}
+          TRADINGAGENTS_SMTP_PORT: ${{ secrets.TRADINGAGENTS_SMTP_PORT }}
+          TRADINGAGENTS_SMTP_USER: ${{ secrets.TRADINGAGENTS_SMTP_USER }}
+          TRADINGAGENTS_SMTP_PASSWORD: ${{ secrets.TRADINGAGENTS_SMTP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          tradingagents advisor portfolio watchdog

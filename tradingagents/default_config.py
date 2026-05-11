@@ -28,6 +28,19 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_RUN_DUE_MAX": "portfolio_advisor_run_due_max",
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_WEEKLY_LLM": "portfolio_advisor_weekly_llm",
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_WEEKLY_ALWAYS_EMAIL": "portfolio_advisor_weekly_always_email",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PLANNER_MODEL": "portfolio_advisor_planner_model",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_REASONING_MODEL": "portfolio_advisor_reasoning_model",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_SKIP_REPLAN_UNCHANGED": "portfolio_advisor_skip_replan_llm_when_unchanged",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_EARNINGS_RAMP_DAYS": "portfolio_advisor_earnings_ramp_days",
+    "TRADINGAGENTS_ANALYSIS_NOTIFY_SUPPRESS_HOLD": "analysis_notify_suppress_hold",
+    "TRADINGAGENTS_EVENT_LOG_PATH": "event_log_path",
+    "TRADINGAGENTS_MEMORY_CONTEXT_LOOKBACK_DAYS": "memory_context_lookback_days",
+    "TRADINGAGENTS_MEMORY_CONTEXT_MAX_SAME": "memory_context_max_same_ticker",
+    "TRADINGAGENTS_MEMORY_CONTEXT_MAX_CROSS": "memory_context_max_cross_ticker",
+    "TRADINGAGENTS_MEMORY_EVENT_LOG_PROMPT_DAYS": "memory_event_log_prompt_days",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_BOOTSTRAP_ON_INIT": "portfolio_advisor_bootstrap_on_init",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_BOOTSTRAP_DELAY": "portfolio_advisor_bootstrap_delay_seconds",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_BOOTSTRAP_MAX_POSITIONS": "portfolio_advisor_bootstrap_max_positions",
     "TRADINGAGENTS_ANALYSIS_EMAIL_TO": "analysis_email_to",
     "TRADINGAGENTS_ANALYSIS_EMAIL_FROM": "analysis_email_from",
     "TRADINGAGENTS_SMTP_HOST": "smtp_host",
@@ -71,6 +84,14 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "results_dir": os.getenv("TRADINGAGENTS_RESULTS_DIR", os.path.join(_TRADINGAGENTS_HOME, "logs")),
     "data_cache_dir": os.getenv("TRADINGAGENTS_CACHE_DIR", os.path.join(_TRADINGAGENTS_HOME, "cache")),
     "memory_log_path": os.getenv("TRADINGAGENTS_MEMORY_LOG_PATH", os.path.join(_TRADINGAGENTS_HOME, "memory", "trading_memory.md")),
+    # Append-only JSONL for alerts, bootstrap, post-earnings, etc. (default: sibling of memory log).
+    "event_log_path": None,
+    # Injected into PM ``past_context`` with markdown memory: rolling calendar window.
+    "memory_context_lookback_days": 90,
+    "memory_context_max_same_ticker": 8,
+    "memory_context_max_cross_ticker": 3,
+    # Recent JSONL lines per ticker appended to ``past_context`` for the graph PM.
+    "memory_event_log_prompt_days": 30,
     # After a pending decision is resolved with returns, the quick LLM may append
     # short rules to learned_rules.md (default: sibling of trading_memory.md).
     "learned_rules_enabled": True,
@@ -88,7 +109,26 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "portfolio_advisor_deep_analysts": ["news", "fundamentals", "market"],
     # Weekly ``advisor portfolio weekly`` = lightweight check only (no full replan).
     "portfolio_advisor_weekly_llm": False,
-    "portfolio_advisor_weekly_always_email": True,
+    "portfolio_advisor_weekly_always_email": False,
+    # Portfolio advisor planner (scheduling) uses ``llm_provider`` + this model.
+    # None = fall back to ``quick_think_llm`` (cheap path for routine scheduling).
+    "portfolio_advisor_planner_model": None,
+    # Stronger model for: post-earnings verdict CLI, and optional advisor digest when
+    # a CRITICAL rule fires. OpenRouter slug recommended, e.g. deepseek/deepseek-r1.
+    "portfolio_advisor_reasoning_model": "deepseek/deepseek-r1",
+    # When True, ``advisor portfolio replan`` skips the planner LLM if live tickers and
+    # the catalyst digest match the last successful plan (saves cost; pending jobs unchanged).
+    "portfolio_advisor_skip_replan_llm_when_unchanged": False,
+    # Injected into the planner prompt: highlight names with earnings within N days.
+    "portfolio_advisor_earnings_ramp_days": 7,
+    # Optional map tickerUpper -> list of thesis break metric strings for plan validation.
+    "portfolio_advisor_thesis_metrics": {},
+    # After a full graph run: skip webhook + advisory email when parsed rating is Hold.
+    "analysis_notify_suppress_hold": False,
+    # After ``advisor portfolio init``: optionally run full graph on every holding (expensive).
+    "portfolio_advisor_bootstrap_on_init": False,
+    "portfolio_advisor_bootstrap_delay_seconds": 45.0,
+    "portfolio_advisor_bootstrap_max_positions": None,
     # Optional: email advisory memo after each successful full-graph run (SMTP).
     "analysis_email_to": None,
     "analysis_email_from": None,

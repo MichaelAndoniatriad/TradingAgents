@@ -39,6 +39,14 @@ class PortfolioRating(str, Enum):
     SELL = "Sell"
 
 
+class ConfidenceLevel(str, Enum):
+    """How strongly the evidence supports the advisory rating (Portfolio Manager)."""
+
+    HIGH = "High"
+    MEDIUM = "Medium"
+    LOW = "Low"
+
+
 class TraderAction(str, Enum):
     """3-tier transaction direction used by the Trader.
 
@@ -186,14 +194,24 @@ class PortfolioDecision(BaseModel):
 
     rating: PortfolioRating = Field(
         description=(
-            "The final position rating. Exactly one of Buy / Overweight / Hold / "
-            "Underweight / Sell, picked based on the analysts' debate."
+            "Advisory stance for the human reader only (this software does not "
+            "place trades). Exactly one of Buy / Overweight / Hold / Underweight / "
+            "Sell, based on the analysts' debate — describe what *you* would "
+            "consider doing with the position, not an executed order."
+        ),
+    )
+    confidence: ConfidenceLevel = Field(
+        description=(
+            "Conviction in the advisory stance: High = evidence aligns strongly; "
+            "Medium = mixed or timing-sensitive; Low = thin data, conflicting "
+            "signals, or elevated uncertainty — the human should size skepticism accordingly."
         ),
     )
     executive_summary: str = Field(
         description=(
-            "A concise action plan covering entry strategy, position sizing, "
-            "key risk levels, and time horizon. Two to four sentences."
+            "A concise personal action plan for the investor: what to consider "
+            "doing, key levels, time horizon, and what would change the view. "
+            "Two to four sentences. Advisory only."
         ),
     )
     investment_thesis: str = Field(
@@ -201,6 +219,22 @@ class PortfolioDecision(BaseModel):
             "Detailed reasoning anchored in specific evidence from the analysts' "
             "debate. If prior lessons are referenced in the prompt context, "
             "incorporate them; otherwise rely solely on the current analysis."
+        ),
+    )
+    investor_framing: str = Field(
+        description=(
+            "Two or three sentences for the human reader: how to mentally frame "
+            "this name right now (patience vs urgency, what deserves calm monitoring "
+            "vs real worry). Supportive, disciplined tone — not hype, not fear-mongering. "
+            "This is guidance for reflection, not therapy or personalized investment advice."
+        ),
+    )
+    stance_vs_prior: Optional[str] = Field(
+        default=None,
+        description=(
+            "If past lessons in the prompt support a comparison, one or two sentences "
+            "on what changed or stayed the same versus that implicit prior stance. "
+            "Otherwise null or omit."
         ),
     )
     price_target: Optional[float] = Field(
@@ -222,12 +256,21 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
     parsers and the report writers already handle.
     """
     parts = [
+        "> **Advisory only — for your review.** This software does not place trades "
+        "or send orders to a broker. Use the sections below as a planning memo.",
+        "",
         f"**Rating**: {decision.rating.value}",
+        "",
+        f"**Confidence**: {decision.confidence.value}",
         "",
         f"**Executive Summary**: {decision.executive_summary}",
         "",
         f"**Investment Thesis**: {decision.investment_thesis}",
+        "",
+        f"**How to think about this**: {decision.investor_framing}",
     ]
+    if decision.stance_vs_prior:
+        parts.extend(["", f"**Versus prior context**: {decision.stance_vs_prior}"])
     if decision.price_target is not None:
         parts.extend(["", f"**Price Target**: {decision.price_target}"])
     if decision.time_horizon:

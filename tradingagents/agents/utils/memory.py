@@ -1,8 +1,9 @@
 """Append-only markdown decision log for TradingAgents."""
 
-from typing import List, Optional
+from datetime import datetime, timedelta
 from pathlib import Path
 import re
+from typing import List, Optional, Set, Tuple
 
 from tradingagents.agents.utils.rating import parse_rating
 
@@ -68,19 +69,77 @@ class TradingMemoryLog:
         """Return entries with outcome:pending (for Phase B)."""
         return [e for e in self.load_entries() if e.get("pending")]
 
-    def get_past_context(self, ticker: str, n_same: int = 5, n_cross: int = 3) -> str:
-        """Return formatted past context string for agent prompt injection."""
+    def get_past_context(
+        self,
+        ticker: str,
+        n_same: int = 5,
+        n_cross: int = 3,
+        *,
+        lookback_days: Optional[int] = None,
+    ) -> str:
+        """Return formatted past context string for agent prompt injection.
+
+        When ``lookback_days`` is set, only entries whose tag date is on or after
+        (today minus that many calendar days) are considered.
+        """
         entries = [e for e in self.load_entries() if not e.get("pending")]
         if not entries:
             return ""
 
-        same, cross = [], []
+        cutoff = None
+        if lookback_days is not None and int(lookback_days) > 0:
+            cutoff = datetime.now().date() - timedelta(days=int(lookback_days))
+
+        def _in_window(e: dict) -> bool:
+            if cutoff is None:
+                return True
+            ds = e.get("date")
+            if not isinstance(ds, str) or len(ds) < 10:
+                return True
+            try:
+                d = datetime.strptime(ds[:10], "%Y-%m-%d").date()
+                return d >= cutoff
+            except ValueError:
+                return True
+
+        pinned_same: Optional[dict] = None
         for e in reversed(entries):
+            if e.get("ticker") == ticker:
+                pinned_same = e
+                break
+
+        windowed = [e for e in entries if _in_window(e)]
+        if not windowed and pinned_same is None:
+            return ""
+
+        seen_keys: Set[Tuple[str, str]] = set()
+        same: List[dict] = []
+
+        def _add_same(e: dict) -> None:
+            if len(same) >= n_same:
+                return
+            ds = str(e.get("date") or "")
+            tk = str(e.get("ticker") or "")
+            k = (ds[:10], tk)
+            if k in seen_keys:
+                return
+            seen_keys.add(k)
+            same.append(e)
+
+        if pinned_same is not None and not _in_window(pinned_same):
+            _add_same(pinned_same)
+
+        for e in reversed(windowed):
+            if len(same) >= n_same:
+                break
+            if e.get("ticker") == ticker:
+                _add_same(e)
+
+        cross: List[dict] = []
+        for e in reversed(windowed):
             if len(same) >= n_same and len(cross) >= n_cross:
                 break
-            if e["ticker"] == ticker and len(same) < n_same:
-                same.append(e)
-            elif e["ticker"] != ticker and len(cross) < n_cross:
+            if e.get("ticker") != ticker and len(cross) < n_cross:
                 cross.append(e)
 
         if not same and not cross:

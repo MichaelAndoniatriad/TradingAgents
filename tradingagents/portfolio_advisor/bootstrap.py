@@ -1,0 +1,112 @@
+"""Run full LangGraph analysis for every current eToro holding (explicit, costly)."""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import time
+from datetime import date, datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from tradingagents.agents.utils.event_log import append_event
+from tradingagents.clerk.deep_runner import run_deep_research, save_deep_report
+from tradingagents.dataflows.config import set_config
+from tradingagents.portfolio_advisor import etoro_scan, messaging, outcome_sync, state
+
+logger = logging.getLogger(__name__)
+
+
+def _book_fingerprint(portfolio_text: str) -> str:
+    return hashlib.sha256((portfolio_text or "").encode("utf-8")).hexdigest()
+
+
+def run_full_portfolio_bootstrap(
+    cfg: Dict[str, Any],
+    *,
+    trade_date: Optional[str] = None,
+    delay_seconds: float = 0.0,
+    max_positions: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Sequential deep research for each live ticker. Updates advisor state fingerprint.
+
+    Emits ``portfolio_book_changed`` event when the eToro text snapshot hash changed
+    since the last stored fingerprint. Appends ``full_graph_decision`` is handled
+    inside ``TradingAgentsGraph``; this layer logs ``bootstrap_position_complete`` or
+    ``bootstrap_position_failed`` per ticker.
+    """
+    set_config(cfg)
+    td = trade_date or date.today().isoformat()
+    _payload, portfolio_text, live, rows = etoro_scan.fetch_portfolio_rows()
+    live_set = etoro_scan.current_ticker_set(live)
+    try:
+        outcome_sync.auto_close_outcomes(cfg, live_set, rows=rows)
+    except Exception:
+        logger.debug("bootstrap outcome_sync skipped", exc_info=True)
+    live_list = sorted(live_set)
+    if not live_list:
+        raise RuntimeError("No tickers in eToro portfolio export.")
+
+    st = state.load_state(cfg)
+    new_fp = _book_fingerprint(portfolio_text)
+    old_fp = st.get("last_portfolio_text_hash")
+    if old_fp and old_fp != new_fp:
+        append_event(
+            cfg,
+            {
+                "ticker": "*",
+                "event_type": "portfolio_book_changed",
+                "key_data": {"old_hash_prefix": str(old_fp)[:12], "new_hash_prefix": str(new_fp)[:12]},
+                "outcome": None,
+            },
+        )
+        messaging.send_advisor_message(
+            cfg,
+            "[TradingAgents] Portfolio book changed since last bootstrap",
+            "eToro snapshot fingerprint changed. Review adds/removes/ch sizes before relying on old schedules.",
+        )
+
+    analysts = cfg.get("portfolio_advisor_deep_analysts") or ["news", "fundamentals", "market"]
+    if not isinstance(analysts, list):
+        analysts = ["news", "fundamentals", "market"]
+
+    cap = max_positions if max_positions is not None and max_positions > 0 else len(live_list)
+    todo: List[str] = live_list[:cap]
+    results: Dict[str, str] = {}
+
+    for i, tid in enumerate(todo):
+        if i > 0 and delay_seconds > 0:
+            time.sleep(float(delay_seconds))
+        try:
+            final_state, _sig = run_deep_research(tid, td, analysts, cfg)
+            rd = Path(str(cfg.get("results_dir", ".")))
+            save_deep_report(results_dir=rd, ticker=tid, trade_date=td, final_state=final_state)
+            rating = ""
+            try:
+                from tradingagents.agents.utils.rating import parse_rating
+
+                rating = parse_rating(str(final_state.get("final_trade_decision") or ""))
+            except Exception:
+                pass
+            results[tid] = "ok"
+        except Exception as e:
+            logger.exception("bootstrap failed for %s", tid)
+            append_event(
+                cfg,
+                {"ticker": tid, "event_type": "bootstrap_position_failed", "key_data": {"error": str(e)}},
+            )
+            results[tid] = f"error: {e}"
+
+    st["last_portfolio_text_hash"] = new_fp
+    st["last_bootstrap_iso"] = datetime.now(timezone.utc).isoformat()
+    state.save_state(cfg, st)
+
+    summary_lines = [f"Portfolio bootstrap finished for {len(todo)} ticker(s) on {td}."]
+    for k, v in results.items():
+        summary_lines.append(f"- {k}: {v}")
+    messaging.send_advisor_message(
+        cfg,
+        f"[TradingAgents] Portfolio bootstrap complete ({len(todo)} names)",
+        "\n".join(summary_lines)[:15000],
+    )
+    return {"trade_date": td, "results": results, "tickers": todo}

@@ -11,6 +11,8 @@ from rich.console import Console
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.advisor.runner import run_advisor_loop, run_advisor_once
+from tradingagents.portfolio_advisor import messaging as portfolio_messaging
+from tradingagents.portfolio_advisor import service as portfolio_advisor_service
 
 console = Console()
 advisor_app = typer.Typer(
@@ -100,3 +102,205 @@ def advisor_example_path():
     """Print the path to the bundled example positions JSON."""
     here = Path(__file__).resolve().parent / "static" / "advisor_positions.example.json"
     console.print(str(here))
+
+
+portfolio_app = typer.Typer(
+    help=(
+        "Autonomous eToro portfolio advisor: init/replan builds an LLM schedule; weekly is a "
+        "light portfolio check; run-due executes scheduled deep research. All advisory only."
+    ),
+    no_args_is_help=True,
+)
+advisor_app.add_typer(portfolio_app, name="portfolio")
+
+
+@portfolio_app.command("init")
+def portfolio_advisor_init(
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Reset advisor state and rebuild the schedule from scratch.",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """First deployment: full eToro scan + LLM schedule + notifications."""
+    _configure_logging(verbose)
+    cfg = DEFAULT_CONFIG.copy()
+    try:
+        portfolio_advisor_service.run_init(cfg, force=force)
+        console.print("[green]Portfolio advisor init complete.[/green]")
+    except Exception as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+
+
+@portfolio_app.command("weekly")
+def portfolio_advisor_weekly(
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Run even if today is not the configured weekday (for testing).",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Light weekly check: positions vs snapshot, overdue jobs, orphan job cleanup (not a full replan)."""
+    _configure_logging(verbose)
+    cfg = DEFAULT_CONFIG.copy()
+    try:
+        outcome = portfolio_advisor_service.run_weekly(cfg, ignore_weekday=force)
+        if outcome == "skipped_weekday":
+            console.print(
+                "[dim]Weekly check skipped (not your configured weekday; "
+                "use --force to run anyway).[/dim]"
+            )
+        else:
+            console.print("[green]Weekly portfolio check complete.[/green]")
+    except Exception as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+
+
+@portfolio_app.command("replan")
+def portfolio_advisor_replan(
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Run even if today is not the configured weekday (for testing).",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Full LLM reschedule (replaces pending jobs). Same weekday gate as weekly by default."""
+    _configure_logging(verbose)
+    cfg = DEFAULT_CONFIG.copy()
+    try:
+        outcome = portfolio_advisor_service.run_replan(cfg, ignore_weekday=force)
+        if outcome == "skipped_weekday":
+            console.print(
+                "[dim]Replan skipped (weekday gate). Use --force to run anyway.[/dim]"
+            )
+        else:
+            console.print("[green]Portfolio advisor replan complete.[/green]")
+    except Exception as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+
+
+@portfolio_app.command("alert")
+def portfolio_advisor_alert(
+    subject: str = typer.Option(..., "--subject", "-s", help="Email / webhook subject line."),
+    body: str = typer.Option(..., "--body", "-b", help="Message body (advisory text)."),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Send an ad-hoc advisor message via the same webhook + SMTP as other portfolio notices."""
+    _configure_logging(verbose)
+    cfg = DEFAULT_CONFIG.copy()
+    ok = portfolio_messaging.send_advisor_message(cfg, subject, body)
+    if ok:
+        console.print("[green]Message sent (at least one channel).[/green]")
+    else:
+        console.print("[yellow]No channel accepted the message; check webhook + SMTP env.[/yellow]")
+
+
+@portfolio_app.command("run-due")
+def portfolio_advisor_run_due(
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Execute pending scheduled deep runs (cron every 10–30 minutes)."""
+    _configure_logging(verbose)
+    cfg = DEFAULT_CONFIG.copy()
+    try:
+        n = portfolio_advisor_service.run_due_jobs(cfg)
+        console.print(f"[cyan]Advisor run-due:[/cyan] processed {n} job(s).")
+    except Exception as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+
+
+@portfolio_app.command("watchdog")
+def portfolio_advisor_watchdog(
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Run even outside the default 13:30 to 20:00 UTC weekday window (for tests).",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Price only rule sweep: no LLM. Use a 5 to 10 minute cron during US equity hours."""
+    _configure_logging(verbose)
+    cfg = DEFAULT_CONFIG.copy()
+    try:
+        n = portfolio_advisor_service.run_watchdog(cfg, ignore_market_hours=force)
+        console.print(f"[cyan]Advisor watchdog:[/cyan] critical alert count {n}.")
+    except Exception as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+
+
+@portfolio_app.command("bootstrap")
+def portfolio_advisor_bootstrap(
+    delay: float = typer.Option(
+        45.0,
+        "--delay",
+        "-d",
+        help="Seconds to sleep between tickers (rate limits / provider throttling).",
+    ),
+    max_positions: Optional[int] = typer.Option(
+        None,
+        "--max",
+        "-m",
+        help="Optional cap on how many holdings to analyze (default: all).",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Run full LangGraph analysis for each live eToro holding (explicit, costly)."""
+    _configure_logging(verbose)
+    cfg = DEFAULT_CONFIG.copy()
+    try:
+        out = portfolio_advisor_service.run_bootstrap(
+            cfg, delay_seconds=delay, max_positions=max_positions
+        )
+        console.print(f"[green]Bootstrap finished:[/green] {out.get('results')}")
+    except Exception as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+
+
+@portfolio_app.command("memory-review")
+def portfolio_advisor_memory_review(
+    days: int = typer.Option(120, "--days", help="Event log lookback window."),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Summarize JSONL event log + optional reasoning narrative (emailed)."""
+    _configure_logging(verbose)
+    cfg = DEFAULT_CONFIG.copy()
+    try:
+        text = portfolio_advisor_service.run_memory_review(cfg, lookback_days=days)
+        console.print(text[:4000])
+        console.print("[green]Memory review sent.[/green]")
+    except Exception as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+
+
+@portfolio_app.command("post-earnings")
+def portfolio_advisor_post_earnings(
+    ticker: str = typer.Option(..., "--ticker", "-t", help="Symbol in your current eToro export."),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """One-shot post-earnings verdict email (reasoning model; advisory only)."""
+    _configure_logging(verbose)
+    cfg = DEFAULT_CONFIG.copy()
+    try:
+        text = portfolio_advisor_service.run_post_earnings(cfg, ticker)
+        console.print("[green]Post-earnings verdict sent.[/green]")
+        console.print(text[:2000])
+    except Exception as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+
+
+@portfolio_app.command("status")
+def portfolio_advisor_status():
+    """Show persisted advisor jobs and last scan timestamps."""
+    cfg = DEFAULT_CONFIG.copy()
+    console.print(portfolio_advisor_service.status_text(cfg))

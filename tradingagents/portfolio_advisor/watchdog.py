@@ -1,0 +1,172 @@
+"""Price only watchdog during market hours. No LLM and no LangGraph."""
+
+from __future__ import annotations
+
+import logging
+from datetime import date, datetime, timezone
+from typing import Any, Dict, List
+
+from tradingagents.advisor.earnings import next_earnings_from_yfinance
+from tradingagents.agents.utils.event_log import append_event
+from tradingagents.portfolio_advisor import etoro_scan, messaging, price_util
+from tradingagents.portfolio_advisor.plan_validation import (
+    _gain_dd_pct,
+    group_position_rows_by_ticker,
+    representative_is_long_for_lots,
+    weighted_avg_open_for_lots,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def in_us_equity_watch_window_utc() -> bool:
+    """Weekdays roughly Mon to Fri, 13:30 to 20:00 UTC inclusive of end minute."""
+    now = datetime.now(timezone.utc)
+    if now.weekday() >= 5:
+        return False
+    m = now.hour * 60 + now.minute
+    return 13 * 60 + 30 <= m <= 20 * 60
+
+
+def _split_watchdog_triggers(
+    rows: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Return (dd40_mandatory_exit, sell_half_trim, dd30_review_only).
+
+    One line per ticker. Lots are merged using size weighted average open for gain or drawdown math.
+    Buckets are mutually exclusive per ticker: dd40 wins; else trim half rules; else dd30 review.
+    """
+    mandatory: List[Dict[str, Any]] = []
+    trim: List[Dict[str, Any]] = []
+    review: List[Dict[str, Any]] = []
+    by_sym = group_position_rows_by_ticker(rows)
+    for sym, lots in by_sym.items():
+        entry = weighted_avg_open_for_lots(lots)
+        is_long = representative_is_long_for_lots(lots)
+        px = price_util.last_close_yfinance(sym)
+        if px is None or entry <= 0:
+            continue
+        gain, dd = _gain_dd_pct(entry, px, is_long)
+        ed = next_earnings_from_yfinance(sym)
+        pre = (
+            ed is not None
+            and gain >= 15.0
+            and 0 <= (ed - date.today()).days <= 14
+        )
+        base = {
+            "ticker": sym,
+            "entry": entry,
+            "price": px,
+            "gain_pct": gain,
+            "drawdown_pct": dd,
+        }
+        if dd >= 40.0:
+            mandatory.append({**base, "codes": ["dd40_mandatory_exit"]})
+            continue
+        trim_codes: List[str] = []
+        if gain >= 100.0:
+            trim_codes.append("double_from_entry")
+        if pre:
+            trim_codes.append("pre_earnings_trim_window")
+        if trim_codes:
+            trim.append({**base, "codes": trim_codes})
+            continue
+        if dd >= 30.0:
+            review.append({**base, "codes": ["dd30_review"]})
+    return mandatory, trim, review
+
+
+def run_watchdog(cfg: Dict[str, Any], *, ignore_market_hours: bool = False) -> int:
+    """Return count of outbound watchdog notifications (0 to 3 if all buckets fire)."""
+    if not ignore_market_hours and not in_us_equity_watch_window_utc():
+        logger.info("watchdog skipped (outside US equity watch window UTC)")
+        return 0
+
+    rows: List[Dict[str, Any]] = []
+    try:
+        _payload, _text, _tickers, rows = etoro_scan.fetch_portfolio_rows()
+    except Exception as e:
+        logger.error("watchdog: eToro fetch failed: %s", e)
+        return 0
+
+    mandatory, trim, review = _split_watchdog_triggers(rows)
+    sent = 0
+    if mandatory:
+        lines = [
+            "Watchdog CRITICAL (price only, no graph).",
+            "Policy: full exit within your written window. This is not a sell half trim.",
+            "",
+        ]
+        for t in mandatory:
+            lines.append(
+                f"{t['ticker']}: codes {t['codes']} weighted_avg_entry {t['entry']:.4f} "
+                f"last about {t['price']:.4f} gain_pct {t['gain_pct']:.1f} drawdown_pct {t['drawdown_pct']:.1f}"
+            )
+        messaging.send_advisor_message(
+            cfg,
+            "[TradingAgents] Watchdog CRITICAL dd40_mandatory_exit",
+            "\n".join(lines),
+        )
+        append_event(
+            cfg,
+            {
+                "ticker": "*",
+                "event_type": "watchdog_critical_alert",
+                "key_data": {"triggers": mandatory},
+                "outcome": None,
+            },
+        )
+        sent += 1
+    if trim:
+        lines = [
+            "Watchdog HIGH sell half policy (price only, no graph).",
+            "Policy: trim or scale per your rules (often sell half), not a mandatory full exit unless you also have dd40 in a separate notice.",
+            "",
+        ]
+        for t in trim:
+            lines.append(
+                f"{t['ticker']}: codes {t['codes']} weighted_avg_entry {t['entry']:.4f} "
+                f"last about {t['price']:.4f} gain_pct {t['gain_pct']:.1f} drawdown_pct {t['drawdown_pct']:.1f}"
+            )
+        messaging.send_advisor_message(
+            cfg,
+            "[TradingAgents] Watchdog HIGH sell_half double_or_pre_earnings",
+            "\n".join(lines),
+        )
+        append_event(
+            cfg,
+            {
+                "ticker": "*",
+                "event_type": "watchdog_trim_alert",
+                "key_data": {"triggers": trim},
+                "outcome": None,
+            },
+        )
+        sent += 1
+    if review:
+        lines = [
+            "Watchdog HIGH dd30 review (price only, no graph).",
+            "Policy: review window, not a mandatory full exit by itself.",
+            "",
+        ]
+        for t in review:
+            lines.append(
+                f"{t['ticker']}: codes {t['codes']} weighted_avg_entry {t['entry']:.4f} "
+                f"last about {t['price']:.4f} gain_pct {t['gain_pct']:.1f} drawdown_pct {t['drawdown_pct']:.1f}"
+            )
+        messaging.send_advisor_message(
+            cfg,
+            "[TradingAgents] Watchdog HIGH dd30_review",
+            "\n".join(lines),
+        )
+        append_event(
+            cfg,
+            {
+                "ticker": "*",
+                "event_type": "watchdog_high_alert",
+                "key_data": {"triggers": review},
+                "outcome": None,
+            },
+        )
+        sent += 1
+    return sent

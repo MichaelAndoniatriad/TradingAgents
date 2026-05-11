@@ -8,15 +8,29 @@
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
 
-# Daily morning clerk (7:00) — tickers from eToro; optional deep research when triggers hit
-CLERK_MODE=etoro
-CLERK_DEEP_RESEARCH=
-0 7 * * * /ABS/PATH/TradingAgents-main/scripts/cron-clerk-morning.sh
+# Daily morning clerk is disabled in this repo — use weekly only (see cron-clerk-weekly.sh).
 
-# Weekly roll-up (Sunday 8:00) with LLM summary
+# Weekly (Sunday 8:00): eToro/watchlist + optional headline rollup from prior daily files,
+# deep-research queue; add CLERK_WEEKLY_EXECUTE_DEEP=1 to run graph
+CLERK_MODE=etoro
+# CLERK_WEEKLY_EXECUTE_DEEP=1
+# CLERK_WEEKLY_MAX_DEEP=2
 0 8 * * SUN /ABS/PATH/TradingAgents-main/scripts/cron-clerk-weekly.sh
+
+# Monthly lookout (1st @ 9:00) — copy cli/static/clerk_monthly_candidates.example.json and edit tickers
+# CLERK_MONTHLY_CANDIDATES=/ABS/PATH/monthly_candidates.json
+# CLERK_MONTHLY_MAX_DEEP=2
+# 0 9 1 * * /ABS/PATH/TradingAgents-main/scripts/cron-clerk-monthly.sh
 
 # Optional: same clerk but from a JSON watchlist instead of eToro
 # CLERK_MODE=watchlist
 # CLERK_WATCHLIST=/ABS/PATH/TradingAgents-main/cli/static/clerk_watchlist.example.json
 # 15 7 * * * /ABS/PATH/TradingAgents-main/scripts/cron-clerk-morning.sh
+
+# Portfolio advisor — first deploy: `advisor portfolio init`
+# Weekly **light check** (default Saturday TRADINGAGENTS_PORTFOLIO_ADVISOR_WEEKDAY=5):
+#   0 9 * * SAT /ABS/PATH/TradingAgents-main/scripts/cron-portfolio-advisor-weekly.sh
+# Optional full LLM **replan** (same weekday gate; use `--force` in script if needed):
+#   0 10 * * SAT /ABS/PATH/TradingAgents-main/scripts/cron-portfolio-advisor-replan.sh
+# Due deep runs (every 15 minutes):
+#   */15 * * * * /ABS/PATH/TradingAgents-main/scripts/cron-portfolio-advisor-due.sh
