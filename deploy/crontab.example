@@ -1,0 +1,22 @@
+# Example crontab — copy into: crontab -e
+# Replace /opt/tradingagents if your repo lives elsewhere (must match real path).
+
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+
+# Every 15 min: run advisor jobs whose scheduled time has passed
+*/15 * * * * /opt/tradingagents/scripts/cron-portfolio-advisor-due.sh
+
+# Saturday 09:00 (server timezone): weekly light check
+0 9 * * SAT /opt/tradingagents/scripts/cron-portfolio-advisor-weekly.sh
+
+# 1st of month 10:00: full LLM replan (costs tokens)
+0 10 1 * * /opt/tradingagents/scripts/cron-portfolio-advisor-replan.sh
+
+# Weekdays every 5 min: price watchdog (no-op outside US equity UTC window)
+*/5 * * * 1-5 /opt/tradingagents/scripts/cron-portfolio-advisor-watchdog.sh
+
+# Optional — only if you use the clerk feature
+# 0 7 * * 1-5 /opt/tradingagents/scripts/cron-clerk-morning.sh
+# 0 8 * * MON /opt/tradingagents/scripts/cron-clerk-weekly.sh
+# 0 9 1 * * /opt/tradingagents/scripts/cron-clerk-monthly.sh

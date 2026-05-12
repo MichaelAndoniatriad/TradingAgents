@@ -1,0 +1,33 @@
+# systemd USER unit — Streamlit always on (survives SSH disconnect if linger is enabled).
+#
+# Install on the server (as ubuntu):
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/streamlit-user.service.example ~/.config/systemd/user/streamlit-tradingagents.service
+#   # Edit paths in the file if your repo is not /opt/tradingagents
+#   chmod +x /opt/tradingagents/scripts/run-streamlit-headless.sh
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now streamlit-tradingagents.service
+#   systemctl --user status streamlit-tradingagents.service
+#
+# Run the UI when you are NOT logged in over SSH:
+#   sudo loginctl enable-linger ubuntu
+#
+# Public UI (0.0.0.0): add under [Service]:
+#   Environment=STREAMLIT_SERVER_ADDRESS=0.0.0.0
+# and open TCP 8501 in your cloud NSG (prefer source = your home IP/32).
+
+[Unit]
+Description=TradingAgents Streamlit UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tradingagents
+Environment=PYTHONPATH=/opt/tradingagents
+ExecStart=/opt/tradingagents/scripts/run-streamlit-headless.sh
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target
