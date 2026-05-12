@@ -36,6 +36,13 @@ app = typer.Typer(
     help="TradingAgents CLI: Multi-Agents LLM Financial Trading Framework",
     add_completion=True,  # Enable shell completion
 )
+
+
+@app.callback()
+def _cli_root() -> None:
+    """TradingAgents root CLI (advisor / clerk / etoro / analyze / ui)."""
+
+
 app.add_typer(advisor_cmd.advisor_app, name="advisor")
 app.add_typer(clerk_cmd.clerk_app, name="clerk")
 app.add_typer(etoro_cmd.etoro_app, name="etoro")

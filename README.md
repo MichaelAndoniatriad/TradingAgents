@@ -162,6 +162,10 @@ Alternatively, copy `.env.example` to `.env` and fill in your keys:
 cp .env.example .env
 ```
 
+### Always-on server (cron / VPS)
+
+To run portfolio advisor schedules while your laptop is off, use `cron` on a small VPS or home server. See [docs/always-on-server.md](docs/always-on-server.md) and `deploy/crontab.example`.
+
 ### CLI Usage
 
 Launch the interactive CLI:

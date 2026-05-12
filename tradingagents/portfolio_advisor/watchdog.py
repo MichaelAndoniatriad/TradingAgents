@@ -19,6 +19,26 @@ from tradingagents.portfolio_advisor.plan_validation import (
 logger = logging.getLogger(__name__)
 
 
+ACTION_LINES = {
+    "dd40_mandatory_exit": "Required action: full exit. No exceptions. No deliberating.",
+    "double_from_entry": "Required action: sell half. Lock in recovered capital. Let remainder run.",
+    "pre_earnings_trim_window": "Required action: sell half before the earnings print.",
+    "dd30_review": "Required action: review window open. Decision point is next scheduled earnings.",
+}
+
+
+def _format_ticker_block(t: Dict[str, Any]) -> List[str]:
+    """One per-ticker block: data line, primary action line, trailing blank line."""
+    data = (
+        f"{t['ticker']}: codes {t['codes']} | weighted_avg_entry {t['entry']:.4f} "
+        f"| last ~{t['price']:.4f} | gain {t['gain_pct']:.1f}% | drawdown {t['drawdown_pct']:.1f}%"
+    )
+    codes = t.get("codes") or []
+    primary_code = codes[0] if codes else ""
+    action = ACTION_LINES.get(primary_code, "Review required.")
+    return [data, f"  {action}", ""]
+
+
 def in_us_equity_watch_window_utc() -> bool:
     """Weekdays roughly Mon to Fri, 13:30 to 20:00 UTC inclusive of end minute."""
     now = datetime.now(timezone.utc)
@@ -98,10 +118,7 @@ def run_watchdog(cfg: Dict[str, Any], *, ignore_market_hours: bool = False) -> i
             "",
         ]
         for t in mandatory:
-            lines.append(
-                f"{t['ticker']}: codes {t['codes']} weighted_avg_entry {t['entry']:.4f} "
-                f"last about {t['price']:.4f} gain_pct {t['gain_pct']:.1f} drawdown_pct {t['drawdown_pct']:.1f}"
-            )
+            lines.extend(_format_ticker_block(t))
         messaging.send_advisor_message(
             cfg,
             "[TradingAgents] Watchdog CRITICAL dd40_mandatory_exit",
@@ -124,10 +141,7 @@ def run_watchdog(cfg: Dict[str, Any], *, ignore_market_hours: bool = False) -> i
             "",
         ]
         for t in trim:
-            lines.append(
-                f"{t['ticker']}: codes {t['codes']} weighted_avg_entry {t['entry']:.4f} "
-                f"last about {t['price']:.4f} gain_pct {t['gain_pct']:.1f} drawdown_pct {t['drawdown_pct']:.1f}"
-            )
+            lines.extend(_format_ticker_block(t))
         messaging.send_advisor_message(
             cfg,
             "[TradingAgents] Watchdog HIGH sell_half double_or_pre_earnings",
@@ -150,10 +164,7 @@ def run_watchdog(cfg: Dict[str, Any], *, ignore_market_hours: bool = False) -> i
             "",
         ]
         for t in review:
-            lines.append(
-                f"{t['ticker']}: codes {t['codes']} weighted_avg_entry {t['entry']:.4f} "
-                f"last about {t['price']:.4f} gain_pct {t['gain_pct']:.1f} drawdown_pct {t['drawdown_pct']:.1f}"
-            )
+            lines.extend(_format_ticker_block(t))
         messaging.send_advisor_message(
             cfg,
             "[TradingAgents] Watchdog HIGH dd30_review",

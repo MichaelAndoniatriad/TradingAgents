@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+from collections import Counter
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -72,7 +73,7 @@ def run_full_portfolio_bootstrap(
 
     cap = max_positions if max_positions is not None and max_positions > 0 else len(live_list)
     todo: List[str] = live_list[:cap]
-    results: Dict[str, str] = {}
+    results: Dict[str, Dict[str, Any]] = {}
 
     for i, tid in enumerate(todo):
         if i > 0 and delay_seconds > 0:
@@ -81,29 +82,63 @@ def run_full_portfolio_bootstrap(
             final_state, _sig = run_deep_research(tid, td, analysts, cfg)
             rd = Path(str(cfg.get("results_dir", ".")))
             save_deep_report(results_dir=rd, ticker=tid, trade_date=td, final_state=final_state)
+            decision_text = str(final_state.get("final_trade_decision") or "")
             rating = ""
             try:
                 from tradingagents.agents.utils.rating import parse_rating
 
-                rating = parse_rating(str(final_state.get("final_trade_decision") or ""))
+                rating = parse_rating(decision_text)
             except Exception:
                 pass
-            results[tid] = "ok"
+            results[tid] = {
+                "status": "ok",
+                "rating": rating or "unknown",
+                "excerpt": decision_text[:300],
+            }
         except Exception as e:
             logger.exception("bootstrap failed for %s", tid)
             append_event(
                 cfg,
                 {"ticker": tid, "event_type": "bootstrap_position_failed", "key_data": {"error": str(e)}},
             )
-            results[tid] = f"error: {e}"
+            results[tid] = {
+                "status": f"error: {e}",
+                "rating": "",
+                "excerpt": "",
+            }
 
     st["last_portfolio_text_hash"] = new_fp
     st["last_bootstrap_iso"] = datetime.now(timezone.utc).isoformat()
     state.save_state(cfg, st)
 
-    summary_lines = [f"Portfolio bootstrap finished for {len(todo)} ticker(s) on {td}."]
-    for k, v in results.items():
-        summary_lines.append(f"- {k}: {v}")
+    summary_lines: List[str] = [
+        f"Portfolio bootstrap finished: {len(todo)} ticker(s) on {td}.",
+        "",
+        "--- Rating distribution ---",
+    ]
+    rating_counts = Counter(
+        v.get("rating", "unknown") for v in results.values() if v.get("status") == "ok"
+    )
+    if rating_counts:
+        for r, count in sorted(rating_counts.items()):
+            summary_lines.append(f"  {r}: {count}")
+    else:
+        summary_lines.append("  (none)")
+    errors = [k for k, v in results.items() if v.get("status") != "ok"]
+    if errors:
+        summary_lines.append(f"  Errors: {len(errors)}")
+
+    summary_lines.extend(["", "--- Per ticker ---"])
+    for ticker, v in results.items():
+        if v.get("status") == "ok":
+            summary_lines.append(f"{ticker}: {v.get('rating', 'unknown')}")
+            excerpt = v.get("excerpt") or ""
+            if excerpt:
+                summary_lines.append(f"  {excerpt[:200]}")
+        else:
+            summary_lines.append(f"{ticker}: ERROR, {v.get('status', '')}")
+        summary_lines.append("")
+
     messaging.send_advisor_message(
         cfg,
         f"[TradingAgents] Portfolio bootstrap complete ({len(todo)} names)",

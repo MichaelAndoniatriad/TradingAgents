@@ -12,6 +12,14 @@ from tradingagents.portfolio_advisor import etoro_scan, outcome_sync, state
 logger = logging.getLogger(__name__)
 
 
+_OUTPUT_RULES = """Rules for this output (apply without exception):
+- No dashes of any kind. No em dashes, en dashes, hyphens as separators or list bullets.
+- No filler words (just, really, basically, simply, notably).
+- No AI patterns (leverage, seamlessly, robust, comprehensive, actionable, transformative, it is worth noting, furthermore).
+- Verdicts before reasoning. State the conclusion first.
+- If a data point is missing, say so explicitly. Do not estimate or invent figures."""
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -43,9 +51,17 @@ def _optional_weekly_narrative(cfg: Dict[str, Any], digest: str) -> str:
         )
         llm = client.get_llm()
         prompt = (
-            "You are a portfolio advisor. In at most 80 words, react to the weekly check digest below. "
-            "Advisory only; no trade orders. If everything looks routine, say so briefly. "
-            "If something deserves attention, name it clearly.\n\n---\n"
+            "You are a portfolio advisor. Advisory only; no trade orders.\n"
+            "React to the weekly check digest below in at most 100 words.\n\n"
+            "Deliver exactly two parts:\n\n"
+            "ATTENTION\n"
+            "Name any position or event that needs action this week. One sentence per item. "
+            "If nothing needs action: none.\n\n"
+            "CONTEXT\n"
+            "One sentence of market or portfolio context relevant to the week ahead. "
+            "If nothing material: omit this section entirely.\n\n"
+            f"{_OUTPUT_RULES}\n\n"
+            "---\n"
             f"{digest[:6000]}"
         )
         msg = llm.invoke(prompt)

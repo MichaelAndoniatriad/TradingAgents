@@ -17,6 +17,14 @@ from tradingagents.portfolio_advisor import messaging
 logger = logging.getLogger(__name__)
 
 
+_OUTPUT_RULES = """Rules for this output (apply without exception):
+- No dashes of any kind. No em dashes, en dashes, hyphens as separators or list bullets.
+- No filler words (just, really, basically, simply, notably).
+- No AI patterns (leverage, seamlessly, robust, comprehensive, actionable, transformative, it is worth noting, furthermore).
+- Verdicts before reasoning. State the conclusion first.
+- If a data point is missing, say so explicitly. Do not estimate or invent figures."""
+
+
 def run_memory_review(cfg: Dict[str, Any], *, lookback_days: int = 120) -> str:
     """Summarize recent events; email result. Uses reasoning model when configured."""
     set_config(cfg)
@@ -37,8 +45,8 @@ def run_memory_review(cfg: Dict[str, Any], *, lookback_days: int = 120) -> str:
     model = (cfg.get("portfolio_advisor_reasoning_model") or "deepseek/deepseek-r1").strip()
     provider = "openrouter" if "/" in model else (cfg.get("llm_provider") or "openrouter").lower()
     base = cfg.get("corporate_openrouter_base_url") or cfg.get("backend_url")
-    prompt = f"""You are reviewing a machine event log for a trading research stack (advisory only, no orders).
-
+    today = date.today().isoformat()
+    prompt = f"""You are reviewing a machine event log for a trading research stack. Advisory only. No trade orders.
 Lookback: last {lookback_days} days.
 
 Event counts by type:
@@ -47,13 +55,31 @@ Event counts by type:
 Last 40 raw events (JSON):
 {sample}
 
-Write a short review (max 12 bullet points) covering:
-1) Which event types dominate and whether that matches a healthy cadence.
-2) Any tickers with repeated failures or missing follow-ups.
-3) One concrete suggestion to tighten the human workflow (not model hype).
+Today (UTC): {today}
 
-If the log is too sparse to infer patterns, say so explicitly.
-Today (UTC date): {date.today().isoformat()}
+Deliver exactly these sections (plain text, no decorative separators):
+
+MEMORY REVIEW {today}
+
+CADENCE CHECK
+Up to four bullets. Which event types dominate? Is the frequency healthy for an active portfolio?
+Flag any type that is missing entirely but should be present (e.g. no outcome_recorded events means the feedback loop is not closing).
+If the log is too sparse to infer patterns, say so explicitly and stop here.
+
+TICKER FLAGS
+Up to four bullets. Any ticker with repeated failures, missing follow-ups, or no full_graph_decision in the window?
+Format each bullet: TICKER, observation, suggested action.
+If no flags: none.
+
+WORKFLOW GAP
+One concrete suggestion to tighten the human workflow. Not model hype. Specific and actionable.
+If nothing stands out: none.
+
+DATA GAPS
+Any event types present but unreadable, malformed, or missing expected fields?
+If none: none.
+
+{_OUTPUT_RULES}
 """
     try:
         llm = create_llm_client(provider, model, base_url=base).get_llm()

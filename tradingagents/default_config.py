@@ -86,6 +86,8 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "memory_log_path": os.getenv("TRADINGAGENTS_MEMORY_LOG_PATH", os.path.join(_TRADINGAGENTS_HOME, "memory", "trading_memory.md")),
     # Append-only JSONL for alerts, bootstrap, post-earnings, etc. (default: sibling of memory log).
     "event_log_path": None,
+    # Append-only JSONL of outbound advisor messages (webhook/SMTP). UI reads this.
+    "message_log_path": None,
     # Injected into PM ``past_context`` with markdown memory: rolling calendar window.
     "memory_context_lookback_days": 90,
     "memory_context_max_same_ticker": 8,

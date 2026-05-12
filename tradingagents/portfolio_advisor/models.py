@@ -25,9 +25,17 @@ class AdvisorJobSpec(BaseModel):
         default="single_model",
         description="single_model: one reasoning LLM pass; full_graph: TradingAgentsGraph.propagate",
     )
-    job_type: str = Field(
+    job_type: Literal[
+        "thesis_check",
+        "weekly_summary",
+        "post_earnings",
+        "routine_monitoring",
+    ] = Field(
         default="routine_monitoring",
-        description="thesis_check | weekly_summary | post_earnings | routine_monitoring (guides single_model prompt)",
+        description=(
+            "Type of analysis this job should run. Determines prompt branching in "
+            "single_model_analysis._build_prompt."
+        ),
     )
     flags: List[str] = Field(
         default_factory=list,

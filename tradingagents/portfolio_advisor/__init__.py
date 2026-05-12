@@ -1,6 +1,10 @@
 """Autonomous portfolio advisor: eToro scan, LLM scheduling, due deep-research runs."""
 
-from tradingagents.portfolio_advisor.messaging import send_advisor_message
+from tradingagents.portfolio_advisor.messaging import (
+    load_recent_messages,
+    message_log_path,
+    send_advisor_message,
+)
 from tradingagents.portfolio_advisor.service import (
     run_bootstrap,
     run_due_jobs,
@@ -22,4 +26,6 @@ __all__ = [
     "run_post_earnings",
     "status_text",
     "send_advisor_message",
+    "load_recent_messages",
+    "message_log_path",
 ]

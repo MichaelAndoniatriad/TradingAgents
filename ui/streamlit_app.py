@@ -9,16 +9,31 @@ import html as html_module
 import json
 import os
 import re
-from datetime import date, datetime
+import calendar as cal_module
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+import pandas as pd
 import streamlit as st
 
 import tradingagents  # noqa: F401 — loads .env
 
+from tradingagents.agents.utils.learned_rules_log import learned_rules_path_for_config
+from tradingagents.clerk.automation_state import (
+    is_clerk_scheduled_automation_paused,
+    set_clerk_scheduled_automation_paused,
+)
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.llm_clients.model_catalog import DEFAULT_CORPORATE_AGENT_ROUTING
+from ui.user_config import (
+    build_overlay_from_scalars_and_routing,
+    effective_corporate_routing,
+    merged_app_config,
+    runtime_config_path,
+    save_runtime_overlay,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,7 +46,151 @@ ANALYST_LABELS = {
 }
 PROVIDERS = ["openrouter", "openai", "google", "anthropic", "ollama", "deepseek", "xai"]
 
-NAV_PAGES = ["Full analysis", "Portfolio advisor", "eToro"]
+NAV_PAGES = ["Dashboard", "Settings"]
+
+AGENT_SPEC_LABELS = {
+    "market_analyst": "Market analyst",
+    "sentiment_analyst": "Sentiment analyst",
+    "fundamentals_analyst": "Fundamentals analyst",
+    "news_analyst": "News analyst",
+    "bull_researcher": "Bull researcher",
+    "bear_researcher": "Bear researcher",
+    "trader": "Trader",
+    "risk_aggressive": "Risk (aggressive)",
+    "risk_neutral": "Risk (neutral)",
+    "risk_conservative": "Risk (conservative)",
+    "research_manager": "Research manager",
+    "portfolio_manager": "Portfolio manager",
+    "reflection": "Reflection",
+}
+
+_WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+_EXECUTION_EVENT_TYPES = [
+    "full_graph_decision",
+    "single_model_analysis",
+    "post_earnings_verdict",
+    "advisor_plan",
+    "plan_validation_override",
+    "outcome_recorded",
+    "bootstrap_position_failed",
+    "portfolio_book_changed",
+    "advisor_replan_skipped",
+]
+
+_WATCHDOG_EVENT_TYPES = [
+    "watchdog_critical_alert",
+    "watchdog_trim_alert",
+    "watchdog_high_alert",
+]
+
+# Snake_case event_type → short title for lists and tables (fallback: title-cased snake).
+EVENT_TYPE_LABELS: Dict[str, str] = {
+    "full_graph_decision": "Full multi-agent decision",
+    "single_model_analysis": "Lightweight model pass",
+    "post_earnings_verdict": "Post-earnings verdict",
+    "advisor_plan": "Advisor schedule updated",
+    "plan_validation_override": "Plan validation override",
+    "outcome_recorded": "Outcome recorded",
+    "bootstrap_position_failed": "Bootstrap run failed (one position)",
+    "portfolio_book_changed": "Portfolio holdings changed",
+    "advisor_replan_skipped": "Replan skipped (unchanged)",
+    "watchdog_critical_alert": "Watchdog: critical",
+    "watchdog_trim_alert": "Watchdog: trim",
+    "watchdog_high_alert": "Watchdog: elevated",
+    "pending_outcome_30d": "30-day outcome pending",
+    "partial_close_outcome": "Partial close outcome",
+}
+
+
+def _event_type_title(event_type: str) -> str:
+    et = str(event_type or "").strip()
+    if not et:
+        return "Unknown event"
+    return EVENT_TYPE_LABELS.get(et, et.replace("_", " ").title())
+
+
+def _ticker_display(ticker: Any) -> str:
+    t = str(ticker or "").strip()
+    if not t or t == "*":
+        return "Portfolio-wide"
+    return t.upper()
+
+
+def _reason_to_sentence(event_type: str, reason: str) -> str:
+    r = (reason or "").strip()
+    hints = {
+        "portfolio_and_catalyst_unchanged": "Portfolio and catalyst digest match the last plan, so the planner was skipped.",
+    }
+    if r in hints:
+        return hints[r]
+    if r:
+        return r.replace("_", " ").strip().capitalize() + "."
+    return ""
+
+
+def _format_key_data_compact(kd: Dict[str, Any], *, max_len: int = 280) -> str:
+    """Readable fallback for arbitrary key_data dicts (short values only)."""
+    parts: List[str] = []
+    skip = {"raw", "payload", "body", "html"}
+    for k in sorted(kd.keys(), key=str):
+        if k in skip:
+            continue
+        v = kd[k]
+        if v is None or v == "" or v == [] or v == {}:
+            continue
+        if isinstance(v, (dict, list)):
+            try:
+                s = json.dumps(v, ensure_ascii=False)
+            except (TypeError, ValueError):
+                s = str(v)
+            if len(s) > 120:
+                s = s[:117] + "…"
+        else:
+            s = str(v).strip().replace("\n", " ")
+            if len(s) > 100:
+                s = s[:97] + "…"
+        label = str(k).replace("_", " ").capitalize()
+        parts.append(f"{label}: {s}")
+        if sum(len(p) + 2 for p in parts) >= max_len:
+            break
+    out = " · ".join(parts)
+    return out[:max_len] if out else "(no details)"
+
+
+def _channel_status_plain(row: Dict[str, Any]) -> str:
+    bits: List[str] = []
+    for key, label in (("webhook_ok", "Webhook"), ("smtp_ok", "Email")):
+        if label not in (row.get("channels_attempted") or []):
+            continue
+        ok = bool(row.get(key))
+        bits.append(f"{label}: {'sent' if ok else 'failed'}")
+    if not bits:
+        return "No delivery channel was used"
+    return " · ".join(bits)
+
+
+def _message_subject_display(subject: str) -> str:
+    s = (subject or "").strip()
+    if not s:
+        return "(No subject)"
+    for prefix in ("[TradingAgents] ", "[TradingAgents]"):
+        if s.startswith(prefix):
+            s = s[len(prefix) :].strip()
+            break
+    if len(s) > 200:
+        return s[:197] + "…"
+    return s
+
+
+def _first_line_preview(text: str, *, max_len: int = 140) -> str:
+    if not text or not str(text).strip():
+        return ""
+    line = str(text).strip().splitlines()[0].strip()
+    line = re.sub(r"\s+", " ", line)
+    if len(line) > max_len:
+        return line[: max_len - 1] + "…"
+    return line
 
 # Session keys for full-width outputs below control columns
 _SS_ANALYSIS = "_ui_last_analysis"
@@ -210,7 +369,7 @@ def _page_header(title: str, subtitle: str) -> None:
 
 
 def _build_config(side: Dict[str, Any]) -> Dict[str, Any]:
-    cfg: Dict[str, Any] = DEFAULT_CONFIG.copy()
+    cfg: Dict[str, Any] = merged_app_config()
     cfg["llm_provider"] = side["provider"].lower().strip()
     cfg["deep_think_llm"] = side["deep_model"].strip()
     cfg["quick_think_llm"] = side["quick_model"].strip()
@@ -234,13 +393,10 @@ def _build_config(side: Dict[str, Any]) -> Dict[str, Any]:
     raw = (side.get("agent_llm_routing_json") or "").strip()
     if raw:
         try:
-            cfg["agent_llm_routing"] = json.loads(raw)
-            if not isinstance(cfg["agent_llm_routing"], dict):
-                cfg["agent_llm_routing"] = {}
+            parsed = json.loads(raw)
+            cfg["agent_llm_routing"] = parsed if isinstance(parsed, dict) else {}
         except json.JSONDecodeError:
             cfg["agent_llm_routing"] = {}
-    else:
-        cfg["agent_llm_routing"] = {}
 
     dv = dict(cfg.get("data_vendors") or {})
     dv["news_data"] = side["news_vendor"]
@@ -252,6 +408,193 @@ def _build_config(side: Dict[str, Any]) -> Dict[str, Any]:
 
 def _selected_analysts(side: Dict[str, Any]) -> List[str]:
     return [k for k in ANALYST_ORDER if side.get(f"analyst_{k}", True)]
+
+
+def _parse_iso_safe(s: Any) -> Optional[datetime]:
+    if not isinstance(s, str) or not s.strip():
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _relative_age(dt: Optional[datetime]) -> str:
+    if dt is None:
+        return "—"
+    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+    delta = now - dt
+    secs = int(delta.total_seconds())
+    future = secs < 0
+    secs = abs(secs)
+    if secs < 60:
+        unit = f"{secs}s"
+    elif secs < 3600:
+        unit = f"{secs // 60}m"
+    elif secs < 86400:
+        unit = f"{secs // 3600}h"
+    else:
+        unit = f"{secs // 86400}d"
+    return f"in {unit}" if future else f"{unit} ago"
+
+
+def _level_color(level: str) -> str:
+    return {
+        "critical": "#d93025",
+        "high": "#e8710a",
+        "review": "#1a73e8",
+        "info": "#5f6368",
+    }.get((level or "info").lower(), "#5f6368")
+
+
+def _level_badge_html(level: str) -> str:
+    color = _level_color(level)
+    label = html_module.escape((level or "info").upper())
+    return (
+        f'<span style="display:inline-block;padding:2px 8px;border-radius:10px;'
+        f'background:{color};color:white;font-size:11px;font-weight:600;letter-spacing:0.4px">'
+        f"{label}</span>"
+    )
+
+
+def _channel_status_html(row: Dict[str, Any]) -> str:
+    pieces: List[str] = []
+    for key, label in (("webhook_ok", "webhook"), ("smtp_ok", "email")):
+        attempted = label in (row.get("channels_attempted") or [])
+        if not attempted:
+            continue
+        ok = bool(row.get(key))
+        color = "#1e8e3e" if ok else "#d93025"
+        pieces.append(
+            f'<span style="color:{color};font-size:12px;margin-right:8px">'
+            f'{"✓" if ok else "✗"} {label}</span>'
+        )
+    if not pieces:
+        pieces.append('<span style="color:#9aa0a6;font-size:12px">no channel configured</span>')
+    return "".join(pieces)
+
+
+def _read_jsonl_tail(path: Path, *, max_lines: int = 12000) -> List[Dict[str, Any]]:
+    if not path.is_file():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    out: List[Dict[str, Any]] = []
+    for line in text.splitlines()[-max_lines:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _load_events_for_ui(cfg: Dict[str, Any], *, max_lines: int = 12000) -> List[Dict[str, Any]]:
+    from tradingagents.agents.utils.event_log import _default_event_path
+
+    path = _default_event_path(cfg)
+    rows = _read_jsonl_tail(path, max_lines=max_lines)
+    rows.reverse()
+    return rows
+
+
+def _load_messages_for_ui(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    from tradingagents.portfolio_advisor import load_recent_messages
+
+    return load_recent_messages(cfg, limit=500)
+
+
+def _load_advisor_state(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    from tradingagents.portfolio_advisor import state as pa_state
+
+    try:
+        return pa_state.load_state(cfg)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _automation_paused() -> bool:
+    return is_clerk_scheduled_automation_paused()
+
+
+def _summarise_event_key_data(row: Dict[str, Any]) -> str:
+    """Turn event key_data into a short, readable sentence for tables and the activity feed."""
+    kd = row.get("key_data") or {}
+    et = str(row.get("event_type") or "")
+    if not isinstance(kd, dict):
+        s = str(kd).strip()
+        return s[:280] if s else "(no details)"
+
+    if "rating" in kd and "trade_date" in kd:
+        return f"Rating {kd.get('rating')} for as-of date {kd.get('trade_date')}"
+    if "rating" in kd:
+        return f"Rating: {kd.get('rating')}"
+
+    if "trade_date" in kd and len(kd) <= 3:
+        extra = [f"{k}: {v}" for k, v in kd.items() if k != "trade_date" and v not in (None, "")]
+        base = f"Analysis date {kd.get('trade_date')}"
+        if extra:
+            return base + " — " + "; ".join(extra)[:200]
+        return base
+
+    if "jobs_queued" in kd:
+        n = kd.get("jobs_queued")
+        cancelled = kd.get("cancelled_pending")
+        mode = kd.get("mode")
+        parts = [f"Queued {n} deep-research job(s)"]
+        if cancelled:
+            parts.append(f"removed {cancelled} older pending job(s)")
+        if mode:
+            parts.append(f"after {mode} plan refresh")
+        return " · ".join(parts) + "."
+
+    if "reason" in kd and len(kd) <= 4:
+        msg = _reason_to_sentence(et, str(kd.get("reason") or ""))
+        if msg:
+            tail = [f"{k}: {v}" for k, v in kd.items() if k != "reason" and v not in (None, "", [], {})]
+            if tail:
+                return msg + " " + "; ".join(tail)[:160]
+            return msg
+        return _format_key_data_compact(kd)
+
+    if "overrides" in kd:
+        ov = kd.get("overrides")
+        if isinstance(ov, list):
+            n = len(ov)
+            preview = ""
+            if ov and isinstance(ov[0], dict):
+                preview = str(ov[0].get("ticker") or ov[0].get("reason") or "")[:80]
+            return f"Validator applied {n} override(s)" + (f" (e.g. {preview})" if preview else "") + "."
+        return f"Validator overrides: {str(ov)[:200]}"
+
+    if "excerpt" in kd:
+        ex = str(kd.get("excerpt") or "").strip().replace("\n", " ")
+        if len(ex) > 200:
+            ex = ex[:197] + "…"
+        return ex or "(empty excerpt)"
+
+    if "triggers" in kd:
+        trig = kd.get("triggers") or []
+        if isinstance(trig, list) and trig:
+            tickers = [str(t.get("ticker", "?")) for t in trig[:8]]
+            more = f" (+{len(trig) - len(tickers)} more)" if len(trig) > len(tickers) else ""
+            return f"{len(trig)} watchlist trigger(s): {', '.join(tickers)}{more}"
+        return "Watchlist triggers updated (no tickers in payload)."
+
+    if "error" in kd:
+        err = str(kd.get("error") or "").strip().replace("\n", " ")
+        return "Error — " + (err[:220] + "…" if len(err) > 220 else err)
+
+    if len(kd) == 1:
+        k, v = next(iter(kd.items()))
+        if isinstance(v, (str, int, float, bool)):
+            return f"{str(k).replace('_', ' ').capitalize()}: {v}"
+
+    return _format_key_data_compact(kd)
 
 
 def _etoro_env_configured() -> bool:
@@ -330,20 +673,6 @@ def _pnl_class(n: Optional[float], *, prefix: str = "ta-val") -> str:
     return f"{prefix}-pnl-flat"
 
 
-def _side_badge_html(is_buy: Any) -> str:
-    if is_buy is True:
-        return (
-            '<span class="ta-badge ta-badge-long" title="Long position">'
-            '<span aria-hidden="true">▲</span> Long</span>'
-        )
-    if is_buy is False:
-        return (
-            '<span class="ta-badge ta-badge-short" title="Short position">'
-            '<span aria-hidden="true">▼</span> Short</span>'
-        )
-    return '<span class="ta-badge ta-badge-unknown">?</span>'
-
-
 def _render_etoro_stats_html(hl: Dict[str, Any]) -> str:
     credit = hl.get("credit")
     unreal = hl.get("unrealized_pnl")
@@ -374,53 +703,85 @@ def _render_etoro_stats_html(hl: Dict[str, Any]) -> str:
 """
 
 
-def _render_etoro_position_cards(rows: List[Dict[str, Any]], *, compact: bool) -> None:
+def _etoro_invested_notional(r: Dict[str, Any]) -> Optional[float]:
+    """Approximate cash deployed at open: |units| × open rate (eToro-style rows)."""
+    u = _safe_float(r.get("units"))
+    op = _safe_float(r.get("openRate"))
+    if u is None or op is None:
+        return None
+    inv = abs(u) * abs(op)
+    return inv if inv > 0 else None
+
+
+def _render_etoro_positions_table(rows: List[Dict[str, Any]]) -> None:
+    """One row per open position: estimated total, return % since open, unrealized $ change."""
     if not rows:
         st.markdown('<p class="ta-pos-empty">No open positions.</p>', unsafe_allow_html=True)
         return
-    grid_cls = "ta-pos-grid ta-pos-grid--compact" if compact else "ta-pos-grid"
-    parts: List[str] = [f'<div class="{grid_cls}">']
-    card_cls = "ta-pos-card ta-pos-card--compact" if compact else "ta-pos-card"
+    out_rows: List[Dict[str, str]] = []
     for r in rows:
-        sym = html_module.escape(str(r.get("symbolFull") or "?"))
-        name = str(r.get("instrumentDisplayName") or "").strip()
-        name_h = html_module.escape(name) if name else ""
-        name_block = f'<div class="ta-pos-name">{name_h}</div>' if name_h else ""
-        units = html_module.escape(str(r.get("units") if r.get("units") is not None else "—"))
-        op = r.get("openRate")
-        op_s = html_module.escape(str(op if op is not None else "—"))
-        pnl_raw = r.get("unrealizedPnL")
-        pf = _safe_float(pnl_raw)
-        pnl_cls = _pnl_class(pf, prefix="ta-pos")
-        if pf is not None:
-            if pf > 0:
-                sk = '<span class="ta-pos-pnl-sticker ta-pos-pnl-sticker-up" title="Unrealized gain">●</span>'
-            elif pf < 0:
-                sk = '<span class="ta-pos-pnl-sticker ta-pos-pnl-sticker-down" title="Unrealized loss">●</span>'
-            else:
-                sk = '<span class="ta-pos-pnl-sticker ta-pos-pnl-sticker-flat" title="Flat">○</span>'
-            pnl_inner = sk + html_module.escape(f" {pf:,.4f}")
+        sym = str(r.get("symbolFull") or "?").strip()
+        nm = str(r.get("instrumentDisplayName") or "").strip()
+        pos_label = sym if not nm else f"{sym} — {nm}"
+        if len(pos_label) > 72:
+            pos_label = pos_label[:69] + "…"
+        inv = _etoro_invested_notional(r)
+        pnl = _safe_float(r.get("unrealizedPnL"))
+        if inv is not None and inv > 0 and pnl is not None:
+            total_est = inv + pnl
+            ret_pct = (pnl / inv) * 100.0
+            total_s = f"${total_est:,.2f}"
+            pct_s = f"{ret_pct:+.2f}%"
+            pnl_s = f"${pnl:+,.2f}"
+        elif inv is not None and inv > 0:
+            total_s = f"${inv:,.2f}"
+            pct_s = "—"
+            pnl_s = "—" if pnl is None else f"${pnl:+,.2f}"
         else:
-            pnl_inner = html_module.escape(str(pnl_raw if pnl_raw is not None else "—"))
-        badge = _side_badge_html(r.get("isBuy"))
-        parts.append(f"""
-<div class="{card_cls}">
-  <div class="ta-pos-head">
-    <div>
-      <div class="ta-pos-symbol">{sym}</div>
-      {name_block}
-    </div>
-    {badge}
-  </div>
-  <div class="ta-pos-meta">
-    <span>Units <strong>{units}</strong></span>
-    <span>Open <strong>{op_s}</strong></span>
-  </div>
-  <div class="ta-pos-pnl {pnl_cls}">uPnL {pnl_inner}</div>
-</div>
-""")
-    parts.append("</div>")
-    st.markdown("\n".join(parts), unsafe_allow_html=True)
+            total_s = "—"
+            pct_s = "—"
+            pnl_s = "—" if pnl is None else f"${pnl:+,.2f}"
+        out_rows.append({
+            "Position": pos_label,
+            "Est. total ($)": total_s,
+            "Return since open (%)": pct_s,
+            "P&L ($)": pnl_s,
+        })
+    st.caption(
+        "**Est. total** = notional at open (|units|×open rate) + unrealized P&L. "
+        "**Return since open** = P&L ÷ that notional. Same fields as in the eToro portfolio export; read-only."
+    )
+    st.dataframe(pd.DataFrame(out_rows), use_container_width=True, hide_index=True)
+
+
+def _render_etoro_export_section(*, key_prefix: str = "etoro") -> None:
+    st.divider()
+    st.markdown("**Export watchlist JSON** from your open positions (for scripts or templates).")
+    out_path = st.text_input(
+        "Output file",
+        value=str(PROJECT_ROOT / "etoro_watchlist.generated.json"),
+        key=f"{key_prefix}_out_path",
+    )
+    trig_path = st.text_input(
+        "Optional triggers template (JSON)",
+        value="",
+        key=f"{key_prefix}_trig_path",
+        help="Copy triggers and analyst settings from this file; tickers still come from eToro.",
+    )
+    if st.button("Save watchlist JSON", type="primary", key=f"{key_prefix}_export_btn"):
+        try:
+            from tradingagents.integrations.etoro.clerk_bridge import (
+                fetch_clerk_watchlist_from_etoro,
+            )
+
+            tpl = Path(trig_path.strip()) if trig_path.strip() else None
+            wl = fetch_clerk_watchlist_from_etoro(tpl)
+            outp = Path(out_path.strip())
+            outp.parent.mkdir(parents=True, exist_ok=True)
+            outp.write_text(json.dumps(wl.to_json_dict(), indent=2), encoding="utf-8")
+            st.success(f"Saved `{outp.resolve()}` — tickers: {', '.join(wl.tickers)}")
+        except Exception as e:
+            st.error(str(e))
 
 
 def _render_etoro_portfolio_block(
@@ -450,7 +811,6 @@ def _render_etoro_portfolio_block(
 
     hl = snap.get("headlines") or {}
     rows: List[Dict[str, Any]] = list(snap.get("rows") or [])
-    compact_cards = not show_export
 
     st.markdown(
         '<div class="ta-etoro-wrap">'
@@ -459,42 +819,14 @@ def _render_etoro_portfolio_block(
         unsafe_allow_html=True,
     )
 
-    exp_label = "Positions" if show_export else "Position details"
-    with st.expander(exp_label, expanded=bool(show_export)):
-        _render_etoro_position_cards(rows, compact=compact_cards)
-        with st.expander("Table view", expanded=False):
-            st.dataframe(rows, use_container_width=True, hide_index=True)
-        with st.expander("Plain text summary", expanded=False):
+    # Always show the table here (do not hide inside a collapsed expander on Dashboard).
+    st.subheader("Open positions")
+    _render_etoro_positions_table(rows)
+    with st.expander("Plain text summary (API)", expanded=False):
             st.text(snap.get("text") or "")
 
     if show_export:
-        st.divider()
-        st.markdown("**Export watchlist JSON** from your open positions (for scripts or templates).")
-        out_path = st.text_input(
-            "Output file",
-            value=str(PROJECT_ROOT / "etoro_watchlist.generated.json"),
-            key="etoro_out_path",
-        )
-        trig_path = st.text_input(
-            "Optional triggers template (JSON)",
-            value="",
-            key="etoro_trig_path",
-            help="Copy triggers and analyst settings from this file; tickers still come from eToro.",
-        )
-        if st.button("Save watchlist JSON", type="primary", key="etoro_export_btn"):
-            try:
-                from tradingagents.integrations.etoro.clerk_bridge import (
-                    fetch_clerk_watchlist_from_etoro,
-                )
-
-                tpl = Path(trig_path.strip()) if trig_path.strip() else None
-                wl = fetch_clerk_watchlist_from_etoro(tpl)
-                outp = Path(out_path.strip())
-                outp.parent.mkdir(parents=True, exist_ok=True)
-                outp.write_text(json.dumps(wl.to_json_dict(), indent=2), encoding="utf-8")
-                st.success(f"Saved `{outp.resolve()}` — tickers: {', '.join(wl.tickers)}")
-            except Exception as e:
-                st.error(str(e))
+        _render_etoro_export_section(key_prefix="etoro")
 
 
 def _render_results(final_state: Dict[str, Any], decision: Any) -> None:
@@ -545,15 +877,723 @@ def _sidebar_shell() -> str:
     return page
 
 
-def _page_full_analysis() -> None:
-    _page_header(
-        "Full analysis",
-        "Run the analyst pipeline for one symbol and date. Reports are saved under your configured results directory.",
+def _ensure_fa_session_seeds() -> None:
+    if st.session_state.get("_ui_fa_seeded_v1"):
+        return
+    bc = merged_app_config()
+    st.session_state["_ui_fa_seeded_v1"] = True
+    st.session_state.setdefault("cb_corporate_hierarchy", bool(bc.get("corporate_hierarchy_enabled", True)))
+    st.session_state.setdefault("txt_corporate_or_url", str(bc.get("corporate_openrouter_base_url") or ""))
+    st.session_state.setdefault(
+        "txt_or_fallback_model",
+        str(bc.get("llm_fallback_openrouter_model") or "openai/gpt-4o-mini"),
+    )
+    routing = bc.get("agent_llm_routing") or {}
+    st.session_state.setdefault(
+        "ta_agent_llm_routing_json",
+        json.dumps(routing, indent=2) if routing else "",
     )
 
-    def_env_provider = os.environ.get("TRADINGAGENTS_LLM_PROVIDER", "openrouter")
-    def_deep = os.environ.get("TRADINGAGENTS_DEEP_THINK_LLM", DEFAULT_CONFIG.get("deep_think_llm", ""))
-    def_quick = os.environ.get("TRADINGAGENTS_QUICK_THINK_LLM", DEFAULT_CONFIG.get("quick_think_llm", ""))
+
+def message_log_path_for_display(cfg: Dict[str, Any]) -> str:
+    from tradingagents.portfolio_advisor import message_log_path
+
+    return str(message_log_path(cfg))
+
+
+def _render_messages_panel(cfg: Dict[str, Any], *, key_prefix: str = "msg") -> None:
+    rows = _load_messages_for_ui(cfg)
+    top = st.columns([2, 2, 3, 1])
+    levels_avail = sorted({(r.get("level") or "info") for r in rows})
+    level_choice = top[0].selectbox(
+        "Level",
+        options=["(all)"] + levels_avail,
+        index=0,
+        key=f"{key_prefix}_level_filter",
+    )
+    delivery_choice = top[1].selectbox(
+        "Delivery",
+        options=["(all)", "delivered", "not delivered"],
+        index=0,
+        key=f"{key_prefix}_delivery_filter",
+    )
+    query = top[2].text_input(
+        "Search subject/body",
+        value="",
+        placeholder="ticker, keyword, …",
+        key=f"{key_prefix}_search",
+    ).strip().lower()
+    if top[3].button("Refresh", use_container_width=True, key=f"{key_prefix}_refresh"):
+        st.rerun()
+
+    if not rows:
+        st.info(
+            "No messages yet. The advisor writes here whenever it sends a webhook/email. "
+            f"Log path: `{message_log_path_for_display(cfg)}`."
+        )
+        return
+
+    filtered: List[Dict[str, Any]] = []
+    for r in rows:
+        if level_choice != "(all)" and r.get("level") != level_choice:
+            continue
+        if delivery_choice == "delivered" and not r.get("delivered"):
+            continue
+        if delivery_choice == "not delivered" and r.get("delivered"):
+            continue
+        if query:
+            hay = (str(r.get("subject", "")) + " " + str(r.get("body", ""))).lower()
+            if query not in hay:
+                continue
+        filtered.append(r)
+
+    st.caption(f"Showing {len(filtered)} of {len(rows)} messages.")
+    for i, r in enumerate(filtered):
+        ts = _parse_iso_safe(r.get("timestamp"))
+        ts_disp = (
+            ts.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z") if ts is not None else str(r.get("timestamp", ""))
+        )
+        age = _relative_age(ts)
+        subject = _message_subject_display(str(r.get("subject", "(no subject)")))
+        header = (
+            f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">'
+            f'{_level_badge_html(str(r.get("level", "info")))}'
+            f'<span style="font-size:12px;color:#5f6368">{ts_disp} · {age}</span>'
+            f'</div>'
+            f'<div style="font-weight:600">{html_module.escape(subject)}</div>'
+            f'<div style="margin-top:2px">{_channel_status_html(r)}</div>'
+        )
+        st.markdown(header, unsafe_allow_html=True)
+        with st.expander("Body", expanded=False):
+            body_raw = str(r.get("body", "") or "")
+            pv = _first_line_preview(body_raw, max_len=200)
+            if pv:
+                st.caption("Preview: " + pv)
+            st.text(body_raw[:50000] or "(empty)")
+        if i < len(filtered) - 1:
+            st.divider()
+
+
+@st.dialog("All messages", width="large")
+def _messages_dialog() -> None:
+    _render_messages_panel(merged_app_config(), key_prefix="dlg_msg")
+
+
+def _activity_collate(cfg: Dict[str, Any], *, limit: int = 25) -> List[Dict[str, Any]]:
+    exec_types = set(_EXECUTION_EVENT_TYPES + _WATCHDOG_EVENT_TYPES)
+    events = _load_events_for_ui(cfg, max_lines=4000)
+    ev_rows: List[Dict[str, Any]] = []
+    for e in events:
+        et = str(e.get("event_type") or "")
+        if et not in exec_types:
+            continue
+        ts = _parse_iso_safe(e.get("timestamp"))
+        if ts is None:
+            continue
+        summ = _summarise_event_key_data(e)
+        title = f"{_event_type_title(et)} — {_ticker_display(e.get('ticker'))}"
+        ev_rows.append({
+            "ts": ts,
+            "kind": "event",
+            "title": title,
+            "detail": summ[:320],
+        })
+        if len(ev_rows) >= 16:
+            break
+    msg_rows: List[Dict[str, Any]] = []
+    for r in _load_messages_for_ui(cfg)[:24]:
+        ts = _parse_iso_safe(r.get("timestamp"))
+        if ts is None:
+            continue
+        subj = _message_subject_display(str(r.get("subject", "")))
+        ch = _channel_status_plain(r)
+        prev = _first_line_preview(str(r.get("body") or ""), max_len=160)
+        detail = ch + (" — " + prev if prev else "")
+        msg_rows.append({
+            "ts": ts,
+            "kind": "msg",
+            "title": subj,
+            "detail": detail[:360],
+        })
+    merged = ev_rows + msg_rows
+    merged.sort(key=lambda x: x["ts"], reverse=True)
+    return merged[:limit]
+
+
+def _render_activity_feed(cfg: Dict[str, Any]) -> None:
+    st.subheader("Agent activity")
+    rows = _activity_collate(cfg)
+    if not rows:
+        st.caption("No recent execution events or outbound messages yet.")
+        return
+    for row in rows:
+        ts = row["ts"]
+        if ts.tzinfo:
+            wall = ts.astimezone().strftime("%b %d, %I:%M %p %Z")
+        else:
+            wall = ts.strftime("%Y-%m-%d %H:%M")
+        age = _relative_age(ts)
+        tag = "Outbox" if row["kind"] == "msg" else "Advisor run"
+        st.markdown(
+            f"<div><span style='font-size:0.72rem;text-transform:uppercase;letter-spacing:0.06em;opacity:0.7'>"
+            f"{html_module.escape(tag)}</span> · "
+            f"<span style='font-size:0.72rem;opacity:0.75'>{html_module.escape(wall)}</span> · "
+            f"<span style='font-size:0.72rem;opacity:0.75'>{html_module.escape(age)}</span></div>"
+            f"<div style='font-weight:600;margin-top:0.35rem'>{html_module.escape(row['title'])}</div>"
+            f"<div style='opacity:0.88;font-size:0.92rem;margin-top:0.25rem;line-height:1.45'>"
+            f"{html_module.escape(row['detail'])}</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown('<hr class="ta-soft"/>', unsafe_allow_html=True)
+
+
+def _render_event_log_expander(cfg: Dict[str, Any]) -> None:
+    with st.expander("Raw event log (filters)", expanded=False):
+        events = _load_events_for_ui(cfg, max_lines=12000)
+        if not events:
+            from tradingagents.agents.utils.event_log import _default_event_path
+
+            st.info(
+                "No events recorded yet. Log path: "
+                f"`{_default_event_path(cfg)}`."
+            )
+            return
+
+        all_types = sorted({str(e.get("event_type") or "") for e in events if e.get("event_type")})
+        all_tickers = sorted({str(e.get("ticker") or "*") for e in events if e.get("ticker")})
+
+        f1, f2, f3, f4 = st.columns([2, 2, 1.5, 1])
+        selected_types = f1.multiselect(
+            "Event types",
+            options=all_types,
+            default=[],
+            placeholder="(all)",
+            key="dash_trig_types",
+            format_func=_event_type_title,
+        )
+        selected_tickers = f2.multiselect(
+            "Tickers",
+            options=all_tickers,
+            default=[],
+            placeholder="(all)",
+            key="dash_trig_tickers",
+            format_func=_ticker_display,
+        )
+        days = f3.slider("Lookback (days)", 1, 365, 30, key="dash_trig_days")
+        min_weight = f4.slider("Min weight", 1, 10, 1, key="dash_trig_weight")
+
+        if f4.button("Refresh", use_container_width=True, key="dash_trig_refresh"):
+            st.rerun()
+
+        from tradingagents.agents.utils.event_log import EVENT_WEIGHTS
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=int(days))
+        filtered: List[Dict[str, Any]] = []
+        for r in events:
+            ts = _parse_iso_safe(r.get("timestamp"))
+            if ts is not None and ts < cutoff:
+                continue
+            et = str(r.get("event_type") or "")
+            if selected_types and et not in selected_types:
+                continue
+            tk = str(r.get("ticker") or "*")
+            if selected_tickers and tk not in selected_tickers:
+                continue
+            w = int(EVENT_WEIGHTS.get(et, 1))
+            if w < int(min_weight):
+                continue
+            filtered.append(r)
+
+        st.caption(f"Showing {len(filtered)} of {len(events)} events.")
+
+        rows_render: List[Dict[str, Any]] = []
+        for r in filtered:
+            ts = _parse_iso_safe(r.get("timestamp"))
+            et = str(r.get("event_type") or "")
+            rows_render.append({
+                "When": ts.astimezone().strftime("%Y-%m-%d %H:%M") if ts else str(r.get("timestamp", "")),
+                "Age": _relative_age(ts),
+                "Scope": _ticker_display(r.get("ticker")),
+                "Activity": _event_type_title(et),
+                "Weight": EVENT_WEIGHTS.get(et, 1),
+                "Details": _summarise_event_key_data(r),
+            })
+        st.dataframe(rows_render, hide_index=True, use_container_width=True, height=360)
+
+        if not filtered:
+            st.caption("No events match the filter.")
+            return
+        options = []
+        for i, r in enumerate(filtered[:200]):
+            ts = _parse_iso_safe(r.get("timestamp"))
+            ts_s = ts.astimezone().strftime("%Y-%m-%d %H:%M") if ts else str(r.get("timestamp", ""))[:16]
+            title = _event_type_title(str(r.get("event_type") or ""))
+            d = _ticker_display(r.get("ticker"))
+            options.append(f"{i+1}. {ts_s} · {title} · {d}")
+        pick = st.selectbox("Inspect row", options=options, index=0, key="dash_trig_pick")
+        if pick:
+            idx = int(pick.split(".", 1)[0]) - 1
+            if 0 <= idx < len(filtered):
+                st.code(json.dumps(filtered[idx], indent=2, ensure_ascii=False), language="json")
+
+
+def _shift_calendar_month(year: int, month: int, delta: int) -> Tuple[int, int]:
+    month += delta
+    while month > 12:
+        month -= 12
+        year += 1
+    while month < 1:
+        month += 12
+        year -= 1
+    return year, month
+
+
+def _pending_job_entries(cfg: Dict[str, Any]) -> List[Tuple[datetime, str, str]]:
+    """UTC scheduled time, ticker, execution tier for each pending job."""
+    st0 = _load_advisor_state(cfg)
+    if "error" in st0 and not st0.get("jobs"):
+        return []
+    out: List[Tuple[datetime, str, str]] = []
+    for j in st0.get("jobs") or []:
+        if j.get("status") != "pending":
+            continue
+        when = _parse_iso_safe(j.get("scheduled_at"))
+        if when is None:
+            continue
+        tick = str(j.get("ticker") or "?").strip().upper() or "?"
+        tier = str(j.get("execution_tier") or "job")
+        out.append((when, tick, tier))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _ts_to_local_date(ts: datetime) -> date:
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone().date()
+
+
+def _jobs_grouped_by_local_day(entries: List[Tuple[datetime, str, str]]) -> Dict[date, List[str]]:
+    by_day: Dict[date, List[str]] = {}
+    for when, tick, tier in entries:
+        d = _ts_to_local_date(when)
+        by_day.setdefault(d, []).append(f"{tick} ({tier})")
+    return by_day
+
+
+def _calendar_month_grid_html(year: int, month: int, job_by_day: Dict[date, List[str]]) -> str:
+    cal = cal_module.Calendar(firstweekday=cal_module.MONDAY)
+    weeks = cal.monthdatescalendar(year, month)
+    today = date.today()
+    hdrs = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    parts: List[str] = [
+        '<div style="font-family:system-ui,-apple-system,sans-serif;font-size:13px">',
+        f'<div style="font-weight:600;margin-bottom:10px;text-align:center">'
+        f"{html_module.escape(cal_module.month_name[month])} {year}</div>",
+        '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px;'
+        'text-align:center;font-size:11px;opacity:0.72;margin-bottom:6px">',
+    ]
+    for h in hdrs:
+        parts.append(f"<div>{html_module.escape(h)}</div>")
+    parts.append("</div>")
+    parts.append('<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:5px">')
+    for week in weeks:
+        for d in week:
+            is_pad = d.month != month
+            is_today = d == today
+            jobs = job_by_day.get(d, [])
+            n = len(jobs)
+            tip = "; ".join(jobs[:8])
+            if len(jobs) > 8:
+                tip += f" (+{len(jobs) - 8} more)"
+            tip_a = html_module.escape(tip) if tip else ""
+            border = (
+                "2px solid #2563eb" if is_today else "1px solid rgba(128,128,128,0.28)"
+            )
+            cell_bg = "rgba(128,128,128,0.06)" if is_pad else "rgba(128,128,128,0.10)"
+            op = "0.4" if is_pad else "1"
+            num = str(d.day)
+            if n:
+                badge = (
+                    f'<div style="font-size:10px;margin-top:3px;font-weight:600;color:#1d4ed8">'
+                    f"{n} job{'s' if n != 1 else ''}</div>"
+                )
+            else:
+                badge = '<div style="font-size:10px;margin-top:3px;opacity:0.4"> </div>'
+            parts.append(
+                f'<div title="{tip_a}" style="min-height:54px;padding:5px 4px;border-radius:8px;border:{border};'
+                f'background:{cell_bg};opacity:{op}">'
+                f'<div style="font-weight:600">{html_module.escape(num)}</div>{badge}</div>'
+            )
+    parts.append("</div></div>")
+    return "".join(parts)
+
+
+def _render_notifications_box(cfg: Dict[str, Any]) -> None:
+    rows = _activity_collate(cfg, limit=14)
+    with st.container(border=True):
+        if not rows:
+            st.caption("No recent outbound messages or advisor runs yet.")
+            return
+        for i, row in enumerate(rows):
+            ts = row["ts"]
+            wall = ts.astimezone().strftime("%b %d, %I:%M %p") if ts.tzinfo else ts.strftime("%m/%d %H:%M")
+            age = _relative_age(ts)
+            tag = "Outbox" if row["kind"] == "msg" else "Run"
+            st.markdown(
+                f"<div style='font-size:0.72rem;opacity:0.75'>{html_module.escape(tag)} · "
+                f"{html_module.escape(wall)} · {html_module.escape(age)}</div>"
+                f"<div style='font-weight:600;font-size:0.95rem;margin:0.2rem 0 0.15rem'>"
+                f"{html_module.escape(row['title'])}</div>"
+                f"<div style='font-size:0.85rem;opacity:0.88;line-height:1.35'>"
+                f"{html_module.escape(row['detail'])}</div>",
+                unsafe_allow_html=True,
+            )
+            if i < len(rows) - 1:
+                st.markdown(
+                    '<div style="height:1px;background:rgba(128,128,128,0.2);margin:0.55rem 0"></div>',
+                    unsafe_allow_html=True,
+                )
+
+
+def _render_planner_calendar(cfg: Dict[str, Any]) -> None:
+    entries = _pending_job_entries(cfg)
+    job_by_day = _jobs_grouped_by_local_day(entries)
+    today = date.today()
+    y = int(st.session_state.get("dash_cal_year", today.year))
+    m = int(st.session_state.get("dash_cal_month", today.month))
+    if m < 1 or m > 12:
+        y, m = today.year, today.month
+
+    p, lab, n = st.columns([1, 4, 1])
+    with p:
+        if st.button("Prev", key="dash_cal_prev", use_container_width=True):
+            y, m = _shift_calendar_month(y, m, -1)
+            st.session_state["dash_cal_year"] = y
+            st.session_state["dash_cal_month"] = m
+            st.rerun()
+    with lab:
+        st.caption(f"{cal_module.month_name[m]} {y} · your local timezone · hover a day for tickers")
+    with n:
+        if st.button("Next", key="dash_cal_next", use_container_width=True):
+            y, m = _shift_calendar_month(y, m, 1)
+            st.session_state["dash_cal_year"] = y
+            st.session_state["dash_cal_month"] = m
+            st.rerun()
+
+    with st.container(border=True):
+        st.markdown(_calendar_month_grid_html(y, m, job_by_day), unsafe_allow_html=True)
+        if not entries:
+            st.caption("No pending jobs in advisor state. After **Deploy** / init, scheduled work appears here.")
+
+
+def _render_schedule_timeline_chart(cfg: Dict[str, Any]) -> None:
+    entries = _pending_job_entries(cfg)
+    start = date.today()
+    days_n = 21
+    day_list = [start + timedelta(days=i) for i in range(days_n)]
+    counts = {d: 0 for d in day_list}
+    for when, _tick, _tier in entries:
+        d = _ts_to_local_date(when)
+        if d in counts:
+            counts[d] += 1
+    df = pd.DataFrame(
+        {
+            "Day": [(start + timedelta(days=i)).strftime("%a %m/%d") for i in range(days_n)],
+            "Pending jobs due": [counts[start + timedelta(days=i)] for i in range(days_n)],
+        }
+    )
+    st.bar_chart(df.set_index("Day"), height=240, use_container_width=True)
+
+
+def _render_dashboard_planning_row(cfg: Dict[str, Any]) -> None:
+    st.subheader("Overview")
+    left, right = st.columns([1.05, 1.15], gap="large")
+    with left:
+        st.markdown("##### Notifications")
+        _render_notifications_box(cfg)
+    with right:
+        st.markdown("##### Planner calendar")
+        _render_planner_calendar(cfg)
+    st.markdown("##### Upcoming scheduled work")
+    st.caption("Bar height = number of **pending** advisor jobs scheduled on that local calendar day (next 21 days).")
+    _render_schedule_timeline_chart(cfg)
+
+
+def _page_dashboard() -> None:
+    _page_header(
+        "Dashboard",
+        "Portfolio snapshot, planner calendar, notifications, schedule chart, deploy/pause, and messages.",
+    )
+    cfg = merged_app_config()
+    _render_dashboard_planning_row(cfg)
+
+    st.divider()
+    st.subheader("Deploy and automation")
+    st.caption(
+        "**Pause** only stops local **Clerk** weekly/monthly cron scripts (marker file under "
+        "`~/.tradingagents/automation/`). It does not stop `advisor portfolio` crons unless you disable those separately."
+    )
+    full_scan = st.checkbox(
+        "Full portfolio scan on deploy (after first-time init, runs the multi-agent graph on each holding — high cost)",
+        value=False,
+        key="dash_full_scan",
+    )
+
+    c0, c1, c2 = st.columns([1.2, 1, 1])
+    with c0:
+        open_msgs = st.button("View all messages", use_container_width=True, key="dash_open_msgs")
+    paused = _automation_paused()
+    with c1:
+        deploy = st.button(
+            "Deploy",
+            type="primary",
+            use_container_width=True,
+            disabled=not _etoro_env_configured(),
+            key="dash_deploy",
+        )
+    with c2:
+        if paused:
+            resume = st.button("Resume", use_container_width=True, key="dash_resume")
+            pause_clicked = False
+        else:
+            resume = False
+            pause_clicked = st.button("Pause", use_container_width=True, key="dash_pause")
+
+    if open_msgs:
+        _messages_dialog()
+
+    if resume and paused:
+        set_clerk_scheduled_automation_paused(False)
+        st.success("Clerk scheduled automation resumed.")
+        st.rerun()
+
+    if not paused and pause_clicked:
+        set_clerk_scheduled_automation_paused(True)
+        st.info("Clerk scheduled automation paused. Use **Resume** to continue.")
+        st.rerun()
+
+    if deploy and _etoro_env_configured():
+        try:
+            from tradingagents.portfolio_advisor import service as pa_service
+
+            st_local = _load_advisor_state(cfg)
+            if st_local.get("first_scan_complete"):
+                st.session_state[_SS_PORT_NOTE] = (
+                    "Portfolio advisor is already initialized. **Deploy** only runs first-time setup. "
+                    "Use the CLI for replan, run-due, weekly, etc."
+                )
+            else:
+                pa_service.run_init(cfg, force=False)
+                note = "Init complete: eToro scan and advisor schedule created."
+                if full_scan:
+                    pa_service.run_bootstrap(cfg, delay_seconds=45.0, max_positions=None)
+                    note += " Full portfolio scan (bootstrap) finished."
+                st.session_state[_SS_PORT_NOTE] = note
+        except Exception as e:
+            st.session_state[_SS_PORT_NOTE] = f"Deploy failed: {e}"
+        try:
+            from tradingagents.portfolio_advisor import service as pa_service
+
+            st.session_state[_SS_PORT_STATUS] = pa_service.status_text(cfg)
+        except Exception as ex:
+            st.session_state[_SS_PORT_STATUS] = f"Status unavailable: {ex}"
+        st.rerun()
+
+    if _SS_PORT_NOTE in st.session_state:
+        note = str(st.session_state[_SS_PORT_NOTE])
+        if "failed" in note.lower():
+            st.error(note)
+        elif "skipped" in note.lower():
+            st.warning(note)
+        elif "already initialized" in note.lower():
+            st.warning(note)
+        else:
+            st.success(note)
+
+    if _etoro_env_configured():
+        if st.button("Refresh advisor status", key="dash_ref_status"):
+            try:
+                from tradingagents.portfolio_advisor import service as pa_service
+
+                st.session_state[_SS_PORT_STATUS] = pa_service.status_text(cfg)
+            except Exception as e:
+                st.session_state[_SS_PORT_STATUS] = f"Status unavailable: {e}"
+            st.rerun()
+        if _SS_PORT_STATUS not in st.session_state:
+            try:
+                from tradingagents.portfolio_advisor import service as pa_service
+
+                st.session_state[_SS_PORT_STATUS] = pa_service.status_text(cfg)
+            except Exception:
+                st.session_state[_SS_PORT_STATUS] = "(not loaded)"
+        with st.expander("Advisor state / queue", expanded=False):
+            st.text_area(
+                "Portfolio advisor state",
+                value=str(st.session_state.get(_SS_PORT_STATUS, "(not loaded)")),
+                height=220,
+                key="dash_pa_status_area",
+                label_visibility="collapsed",
+                disabled=True,
+            )
+
+    if _etoro_env_configured():
+        with st.expander("Export watchlist JSON", expanded=False):
+            _render_etoro_export_section(key_prefix="dash_etoro")
+
+    with st.expander("Full activity feed (verbose)", expanded=False):
+        _render_activity_feed(cfg)
+
+    _render_event_log_expander(cfg)
+
+
+def _settings_memory_tab() -> None:
+    cfg = merged_app_config()
+    mem_path = Path(str(cfg.get("memory_log_path") or "")).expanduser()
+    lr_path = learned_rules_path_for_config(cfg)
+
+    st.markdown("**Paths** (from config / `.env`)")
+    st.caption(f"Memory log: `{mem_path}`")
+    st.caption(f"Learned rules: `{lr_path or '(disabled / unknown)'}`")
+
+    mem_text = mem_path.read_text(encoding="utf-8") if mem_path.is_file() else ""
+    lr_text = ""
+    if lr_path and lr_path.is_file():
+        lr_text = lr_path.read_text(encoding="utf-8")
+
+    m1 = st.text_area("Trading memory (markdown)", value=mem_text, height=220, key="mem_edit_md")
+    if lr_path is not None:
+        m2 = st.text_area("Learned rules (markdown)", value=lr_text, height=160, key="mem_edit_lr")
+    else:
+        m2 = ""
+        st.info("Learned rules path is not configured (check `learned_rules_enabled` / `learned_rules_path`).")
+
+    if st.button("Save memory files to disk", key="mem_save_files"):
+        try:
+            mem_path.parent.mkdir(parents=True, exist_ok=True)
+            mem_path.write_text(m1, encoding="utf-8")
+            if lr_path is not None:
+                lr_path.parent.mkdir(parents=True, exist_ok=True)
+                lr_path.write_text(m2, encoding="utf-8")
+            st.success("Files written.")
+        except Exception as e:
+            st.error(str(e))
+
+    st.markdown("**Context injected into agents**")
+    bc = merged_app_config()
+    lb = st.number_input("Lookback days (memory context)", min_value=1, max_value=3650, value=int(bc.get("memory_context_lookback_days", 90)), key="mem_ctx_lb")
+    ms = st.number_input("Max same-ticker snippets", min_value=1, max_value=100, value=int(bc.get("memory_context_max_same_ticker", 8)), key="mem_ctx_ms")
+    mc = st.number_input("Max cross-ticker snippets", min_value=0, max_value=50, value=int(bc.get("memory_context_max_cross_ticker", 3)), key="mem_ctx_mc")
+    ed = st.number_input("Event log prompt days", min_value=1, max_value=365, value=int(bc.get("memory_event_log_prompt_days", 30)), key="mem_ctx_ed")
+
+    if st.button("Save memory context settings", key="mem_save_ctx"):
+        routing = merged_app_config().get("agent_llm_routing") or {}
+        scalars = {
+            "memory_context_lookback_days": int(lb),
+            "memory_context_max_same_ticker": int(ms),
+            "memory_context_max_cross_ticker": int(mc),
+            "memory_event_log_prompt_days": int(ed),
+        }
+        save_runtime_overlay(build_overlay_from_scalars_and_routing(scalars, routing))
+        st.success("Saved to ui_runtime_config.json")
+        st.rerun()
+
+
+def _settings_llm_tab() -> None:
+    cfg = merged_app_config()
+    st.caption(
+        "Per-agent models use OpenRouter slugs (e.g. `openai/gpt-4o-mini`). "
+        "Changes are written to `ui_runtime_config.json`."
+    )
+    st.checkbox(
+        "Enable corporate hierarchy (per-agent OpenRouter)",
+        value=bool(cfg.get("corporate_hierarchy_enabled", True)),
+        key="set_llm_corp",
+    )
+    fb = st.text_input(
+        "Rate-limit fallback model (OpenRouter slug)",
+        value=str(cfg.get("llm_fallback_openrouter_model") or "openai/gpt-4o-mini"),
+        key="set_llm_fb",
+    )
+    or_url = st.text_input(
+        "OpenRouter base URL (optional)",
+        value=str(cfg.get("corporate_openrouter_base_url") or ""),
+        key="set_llm_orurl",
+        help="Leave blank for default https://openrouter.ai/api/v1",
+    )
+    eff = effective_corporate_routing(cfg)
+    for agent_key in DEFAULT_CORPORATE_AGENT_ROUTING:
+        label = AGENT_SPEC_LABELS.get(agent_key, agent_key)
+        st.text_input(
+            label,
+            value=str(eff.get(agent_key, {}).get("model", "")),
+            key=f"llm_route_{agent_key}",
+        )
+
+    st.markdown("**Portfolio advisor models**")
+    pm = st.text_input(
+        "Planner model (blank = use quick_think_llm from env/defaults)",
+        value=str(cfg.get("portfolio_advisor_planner_model") or ""),
+        key="set_llm_adv_planner",
+    )
+    rm = st.text_input(
+        "Reasoning model (post-earnings, critical digests)",
+        value=str(cfg.get("portfolio_advisor_reasoning_model") or ""),
+        key="set_llm_adv_reason",
+    )
+
+    if st.button("Save LLM settings", type="primary", key="set_llm_save"):
+        routing_out: Dict[str, Any] = {}
+        for k in DEFAULT_CORPORATE_AGENT_ROUTING:
+            user_m = (st.session_state.get(f"llm_route_{k}") or "").strip()
+            default_m = str(DEFAULT_CORPORATE_AGENT_ROUTING[k].get("model") or "")
+            if user_m and user_m != default_m:
+                routing_out[k] = {"model": user_m}
+        scalars: Dict[str, Any] = {
+            "corporate_hierarchy_enabled": bool(st.session_state.get("set_llm_corp")),
+            "llm_fallback_openrouter_model": (st.session_state.get("set_llm_fb") or "openai/gpt-4o-mini").strip(),
+            "corporate_openrouter_base_url": (st.session_state.get("set_llm_orurl") or "").strip() or None,
+            "portfolio_advisor_planner_model": (st.session_state.get("set_llm_adv_planner") or "").strip() or None,
+            "portfolio_advisor_reasoning_model": (st.session_state.get("set_llm_adv_reason") or "").strip() or None,
+        }
+        save_runtime_overlay(build_overlay_from_scalars_and_routing(scalars, routing_out))
+        for k in DEFAULT_CORPORATE_AGENT_ROUTING:
+            st.session_state.pop(f"llm_route_{k}", None)
+        for k in ("set_llm_corp", "set_llm_fb", "set_llm_orurl", "set_llm_adv_planner", "set_llm_adv_reason"):
+            st.session_state.pop(k, None)
+        st.success("Saved to ui_runtime_config.json")
+        st.rerun()
+
+
+def _page_settings() -> None:
+    _page_header(
+        "Settings",
+        "Memory files, context tuning, and LLM routing. Persisted under ~/.tradingagents/ui_runtime_config.json for this UI only.",
+    )
+    st.caption(
+        f"Overlay file: `{runtime_config_path()}`. CLI and cron jobs still use `.env` unless you load this file yourself."
+    )
+    t1, t2, t3 = st.tabs(["Memory and learning", "LLMs", "Manual full analysis"])
+    with t1:
+        _settings_memory_tab()
+    with t2:
+        _settings_llm_tab()
+    with t3:
+        _section_full_analysis()
+
+
+def _section_full_analysis() -> None:
+    st.subheader("Manual full analysis")
+    st.caption(
+        "Run the multi-agent graph for one symbol. Uses **LLMs** tab routing unless you override JSON below. "
+        "Reports go to your configured results directory."
+    )
+    _ensure_fa_session_seeds()
+    bc = merged_app_config()
+    def_env_provider = str(bc.get("llm_provider") or "openrouter")
+    def_deep = str(bc.get("deep_think_llm") or "openai/gpt-4o")
+    def_quick = str(bc.get("quick_think_llm") or "openai/gpt-4o-mini")
+    def_backend = str(bc.get("backend_url") or "")
 
     left, right = st.columns([1.1, 1], gap="large")
 
@@ -564,11 +1604,13 @@ def _page_full_analysis() -> None:
             "Ticker",
             value="NVDA",
             help="Include exchange suffix when needed, e.g. 7203.T, VOD.L",
+            key="settings_fa_ticker",
         ).strip().upper()
         trade_date = st.text_input(
             "Analysis date",
             value=today,
             help="YYYY-MM-DD. Cannot be in the future.",
+            key="settings_fa_date",
         )
 
         st.markdown('<p class="ta-section"><strong>Analysts</strong></p>', unsafe_allow_html=True)
@@ -583,46 +1625,60 @@ def _page_full_analysis() -> None:
             "LLM provider",
             options=PROVIDERS,
             index=PROVIDERS.index(def_env_provider) if def_env_provider in PROVIDERS else 0,
+            key="settings_fa_provider",
         )
         backend_url = st.text_input(
             "API base URL (optional)",
-            value=os.environ.get("TRADINGAGENTS_LLM_BACKEND_URL", ""),
+            value=def_backend,
             help="Leave blank for the provider default.",
+            key="settings_fa_backend",
         )
-        deep_model = st.text_input("Deep / slow model", value=str(def_deep or "openai/gpt-4o"))
-        quick_model = st.text_input("Quick model", value=str(def_quick or "openai/gpt-4o-mini"))
-        output_language = st.text_input("Output language", value="English")
-        news_vendor = st.selectbox("News data source", ["yfinance", "alpha_vantage"], index=0)
+        deep_model = st.text_input("Deep / slow model", value=def_deep, key="settings_fa_deep")
+        quick_model = st.text_input("Quick model", value=def_quick, key="settings_fa_quick")
+        output_language = st.text_input(
+            "Output language",
+            value=str(bc.get("output_language") or "English"),
+            key="settings_fa_lang",
+        )
+        news_vendor = st.selectbox("News data source", ["yfinance", "alpha_vantage"], index=0, key="settings_fa_news")
 
         with st.expander("Advanced graph options", expanded=False):
-            max_debate = st.slider("Research debate rounds", 1, 3, int(DEFAULT_CONFIG.get("max_debate_rounds", 1)))
-            max_risk = st.slider("Risk debate rounds", 1, 3, int(DEFAULT_CONFIG.get("max_risk_discuss_rounds", 1)))
-            checkpoint = st.checkbox("Checkpoint resume (SQLite)", value=False)
+            max_debate = st.slider(
+                "Research debate rounds",
+                1,
+                3,
+                int(bc.get("max_debate_rounds", 1)),
+                key="settings_fa_md",
+            )
+            max_risk = st.slider(
+                "Risk debate rounds",
+                1,
+                3,
+                int(bc.get("max_risk_discuss_rounds", 1)),
+                key="settings_fa_mr",
+            )
+            checkpoint = st.checkbox("Checkpoint resume (SQLite)", value=False, key="settings_fa_ck")
 
         st.markdown('<p class="ta-section"><strong>Corporate hierarchy (OpenRouter)</strong></p>', unsafe_allow_html=True)
         st.caption(
-            "Default: per-agent OpenRouter models from `DEFAULT_CORPORATE_AGENT_ROUTING`. "
-            "Requires `OPENROUTER_API_KEY`. Turn off to use the legacy single-provider pair above."
+            "Defaults come from the **LLMs** tab. Requires `OPENROUTER_API_KEY`. "
+            "Turn off to use the legacy single-provider pair above."
         )
         corporate_hierarchy = st.checkbox(
             "Enable corporate hierarchy (per-agent OpenRouter)",
-            value=bool(DEFAULT_CONFIG.get("corporate_hierarchy_enabled", True)),
             key="cb_corporate_hierarchy",
         )
         corporate_openrouter_base_url = st.text_input(
             "OpenRouter base URL (optional)",
-            value="",
             help="Leave blank for https://openrouter.ai/api/v1",
             key="txt_corporate_or_url",
         )
         llm_fallback_openrouter_model = st.text_input(
             "Rate-limit fallback model (OpenRouter slug)",
-            value=str(DEFAULT_CONFIG.get("llm_fallback_openrouter_model") or "openai/gpt-4o-mini"),
             key="txt_or_fallback_model",
         )
         agent_llm_routing_json = st.text_area(
-            "Optional `agent_llm_routing` JSON (partial overrides per logical agent)",
-            value="",
+            "Optional `agent_llm_routing` JSON (overrides **LLMs** tab for this run only if valid JSON)",
             height=120,
             placeholder='{"news_analyst": {"model": "google/gemini-2.5-flash"}}',
             key="ta_agent_llm_routing_json",
@@ -669,7 +1725,7 @@ def _page_full_analysis() -> None:
             st.error("Select at least one analyst.")
             return
 
-        cfg = _build_config(side)
+        run_cfg = _build_config(side)
         progress = st.empty()
         status = st.status("Running agents…", expanded=True)
 
@@ -688,7 +1744,7 @@ def _page_full_analysis() -> None:
                     parts.append(label)
             progress.markdown("**Progress:** " + (" → ".join(parts) if parts else "Starting…"))
 
-        cfg["progress_callback"] = on_progress
+        run_cfg["progress_callback"] = on_progress
 
         run_ok = False
         final_state: Dict[str, Any] = {}
@@ -698,14 +1754,14 @@ def _page_full_analysis() -> None:
                 graph = TradingAgentsGraph(
                     selected_analysts=selected,
                     debug=False,
-                    config=cfg,
+                    config=run_cfg,
                 )
                 final_state, decision = graph.propagate(ticker, trade_date)
                 run_ok = True
             except Exception as e:
                 st.error(f"Run failed: {e}")
             finally:
-                cfg.pop("progress_callback", None)
+                run_cfg.pop("progress_callback", None)
 
         if run_ok:
             status.update(label="Complete", state="complete", expanded=False)
@@ -722,184 +1778,6 @@ def _page_full_analysis() -> None:
         _render_results(fs, dec)
 
 
-def _page_portfolio_advisor() -> None:
-    _page_header(
-        "Portfolio advisor",
-        "Autonomous advisor: first-run schedule, weekly light checks, optional replans, and due deep runs.",
-    )
-    if not _etoro_env_configured():
-        st.warning("Set ETORO_API_KEY and ETORO_USER_KEY in `.env` to use portfolio advisor automation.")
-        return
-
-    st.caption(
-        "Advisory only. No orders are placed. Notifications use the same webhook / SMTP "
-        "analysis channels configured in `.env`."
-    )
-
-    cfg = DEFAULT_CONFIG.copy()
-    weekday = int(cfg.get("portfolio_advisor_weekly_weekday", 5))
-    st.markdown(
-        f"**Configured weekly day:** `{weekday}` (0=Mon … 6=Sun) · "
-        f"**run-due cap per invocation:** `{int(cfg.get('portfolio_advisor_run_due_max', 2))}`"
-    )
-
-    c0, c1, c2, c3 = st.columns(4)
-    force_init = c0.checkbox("Force init reset", value=False, key="pa_force_init")
-    force_weekly = c1.checkbox("Force weekly now", value=False, key="pa_force_weekly")
-    force_replan = c2.checkbox("Force replan now", value=False, key="pa_force_replan")
-    _ = c3.checkbox("Show status after actions", value=True, key="pa_show_status")
-
-    b0, b1, b2, b3, b4 = st.columns(5)
-    init_run = b0.button("Init", type="primary", use_container_width=True, key="pa_btn_init")
-    weekly_run = b1.button("Weekly check", use_container_width=True, key="pa_btn_weekly")
-    replan_run = b2.button("Replan", use_container_width=True, key="pa_btn_replan")
-    due_run = b3.button("Run due jobs", use_container_width=True, key="pa_btn_due")
-    status_refresh = b4.button("Refresh status", use_container_width=True, key="pa_btn_status")
-
-    pe_a, pe_b = st.columns([3, 1])
-    pe_ticker = pe_a.text_input(
-        "Post-earnings ticker (one-shot reasoning memo)",
-        "",
-        key="pa_pe_ticker",
-        help="Uses portfolio_advisor_reasoning_model (default DeepSeek R1 on OpenRouter).",
-    )
-    post_earnings_run = pe_b.button("Send post-earnings verdict", use_container_width=True, key="pa_btn_pe")
-
-    st.caption(
-        "Bootstrap runs the **full multi-agent graph** on every holding (high cost). "
-        "Prefer `advisor portfolio run-due` for scheduled work unless you intentionally want a full refresh."
-    )
-    boot_a, boot_b, boot_c = st.columns([2, 1, 1])
-    boot_delay = boot_a.number_input("Delay between tickers (seconds)", min_value=0.0, value=45.0, step=5.0, key="pa_boot_delay")
-    boot_max = boot_b.number_input("Max tickers (0 = all)", min_value=0, value=0, step=1, key="pa_boot_max")
-    boot_confirm = boot_c.checkbox("I understand the cost", value=False, key="pa_boot_confirm")
-    bootstrap_run = st.button("Run portfolio bootstrap (full graph each)", key="pa_btn_bootstrap")
-    memory_review_run = st.button("Run memory review (event log summary)", key="pa_btn_memrev")
-
-    try:
-        from tradingagents.portfolio_advisor import messaging as pa_messaging
-        from tradingagents.portfolio_advisor import service as pa_service
-    except Exception as e:
-        st.error(f"Could not load portfolio advisor modules: {e}")
-        return
-
-    if init_run:
-        try:
-            pa_service.run_init(cfg, force=force_init)
-            st.session_state[_SS_PORT_NOTE] = "Init complete: full portfolio scan and schedule created."
-        except Exception as e:
-            st.session_state[_SS_PORT_NOTE] = f"Init failed: {e}"
-    if weekly_run:
-        try:
-            outcome = pa_service.run_weekly(cfg, ignore_weekday=force_weekly)
-            st.session_state[_SS_PORT_NOTE] = f"Weekly check outcome: {outcome}"
-        except Exception as e:
-            st.session_state[_SS_PORT_NOTE] = f"Weekly check failed: {e}"
-    if replan_run:
-        try:
-            outcome = pa_service.run_replan(cfg, ignore_weekday=force_replan)
-            st.session_state[_SS_PORT_NOTE] = f"Replan outcome: {outcome}"
-        except Exception as e:
-            st.session_state[_SS_PORT_NOTE] = f"Replan failed: {e}"
-    if due_run:
-        try:
-            n = pa_service.run_due_jobs(cfg)
-            st.session_state[_SS_PORT_NOTE] = f"Run-due processed {n} job(s)."
-        except Exception as e:
-            st.session_state[_SS_PORT_NOTE] = f"Run-due failed: {e}"
-    if post_earnings_run:
-        sym = (pe_ticker or "").strip().upper()
-        if not sym:
-            st.session_state[_SS_PORT_NOTE] = "Enter a ticker for post-earnings."
-        else:
-            try:
-                pa_service.run_post_earnings(cfg, sym)
-                st.session_state[_SS_PORT_NOTE] = f"Post-earnings verdict sent for {sym}."
-            except Exception as e:
-                st.session_state[_SS_PORT_NOTE] = f"Post-earnings failed: {e}"
-    if bootstrap_run:
-        if not boot_confirm:
-            st.session_state[_SS_PORT_NOTE] = "Bootstrap requires the cost confirmation checkbox."
-        else:
-            try:
-                mx = int(boot_max) if boot_max and boot_max > 0 else None
-                pa_service.run_bootstrap(cfg, delay_seconds=float(boot_delay), max_positions=mx)
-                st.session_state[_SS_PORT_NOTE] = "Portfolio bootstrap finished (see email/webhook)."
-            except Exception as e:
-                st.session_state[_SS_PORT_NOTE] = f"Bootstrap failed: {e}"
-    if memory_review_run:
-        try:
-            pa_service.run_memory_review(cfg, lookback_days=120)
-            st.session_state[_SS_PORT_NOTE] = "Memory review sent (see email/webhook)."
-        except Exception as e:
-            st.session_state[_SS_PORT_NOTE] = f"Memory review failed: {e}"
-
-    if status_refresh or any(
-        [init_run, weekly_run, replan_run, due_run, post_earnings_run, bootstrap_run, memory_review_run]
-    ) or _SS_PORT_STATUS not in st.session_state:
-        try:
-            st.session_state[_SS_PORT_STATUS] = pa_service.status_text(cfg)
-        except Exception as e:
-            st.session_state[_SS_PORT_STATUS] = f"Status unavailable: {e}"
-
-    if _SS_PORT_NOTE in st.session_state:
-        note = str(st.session_state[_SS_PORT_NOTE])
-        if "failed" in note.lower():
-            st.error(note)
-        elif "skipped" in note.lower():
-            st.warning(note)
-        else:
-            st.success(note)
-
-    st.divider()
-    st.subheader("State and queue")
-    st.text_area(
-        "Portfolio advisor state",
-        value=str(st.session_state.get(_SS_PORT_STATUS, "(not loaded)")),
-        height=260,
-        key="pa_status_area",
-        label_visibility="collapsed",
-        disabled=True,
-    )
-
-    st.divider()
-    st.subheader("Send ad-hoc advisor message")
-    msg_subj = st.text_input(
-        "Subject",
-        value="[TradingAgents] Portfolio advisor notice",
-        key="pa_alert_subject",
-    )
-    msg_body = st.text_area(
-        "Message body",
-        value="",
-        height=130,
-        key="pa_alert_body",
-        help="Sends through configured analysis webhook/SMTP channels.",
-    )
-    if st.button("Send message", use_container_width=True, key="pa_alert_send"):
-        try:
-            ok = pa_messaging.send_advisor_message(cfg, msg_subj.strip(), msg_body.strip())
-            if ok:
-                st.success("Message sent (at least one channel accepted it).")
-            else:
-                st.warning("No channel accepted the message. Check webhook/SMTP env vars.")
-        except Exception as e:
-            st.error(f"Message send failed: {e}")
-
-
-def _page_etoro() -> None:
-    _page_header(
-        "eToro",
-        "Read-only portfolio. This app does not place trades.",
-    )
-    if not _etoro_env_configured():
-        st.info(
-            "Add **ETORO_API_KEY** and **ETORO_USER_KEY** to `.env` "
-            "(eToro → Settings → Trading → API Key Management), then click Refresh."
-        )
-    _render_etoro_portfolio_block(show_export=True, show_section_title=False)
-
-
 def main() -> None:
     st.set_page_config(
         page_title="TradingAgents",
@@ -910,19 +1788,17 @@ def main() -> None:
 
     page = _sidebar_shell()
 
-    if _etoro_env_configured() and page != "eToro":
+    if _etoro_env_configured() and page == "Dashboard":
         _render_etoro_portfolio_block(show_export=False, compact_title=True, show_section_title=True)
-    elif not _etoro_env_configured() and page != "eToro":
+    elif not _etoro_env_configured() and page == "Dashboard":
         st.caption(
             "eToro: set **ETORO_API_KEY** and **ETORO_USER_KEY** in `.env` to show a portfolio summary above."
         )
 
-    if page == "Full analysis":
-        _page_full_analysis()
-    elif page == "Portfolio advisor":
-        _page_portfolio_advisor()
+    if page == "Dashboard":
+        _page_dashboard()
     else:
-        _page_etoro()
+        _page_settings()
 
 
 if __name__ == "__main__":
