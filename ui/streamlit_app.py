@@ -8,6 +8,7 @@ from __future__ import annotations
 import html as html_module
 import json
 import os
+from collections import OrderedDict
 import re
 import calendar as cal_module
 from datetime import date, datetime, timedelta, timezone
@@ -25,6 +26,7 @@ from tradingagents.clerk.automation_state import (
     set_clerk_scheduled_automation_paused,
 )
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.integrations.etoro.clerk_bridge import _normalize_ticker
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.llm_clients.model_catalog import DEFAULT_CORPORATE_AGENT_ROUTING
 from ui.user_config import (
@@ -213,16 +215,16 @@ def _inject_app_styles() -> None:
 
   /* eToro portfolio strip */
   .ta-etoro-wrap {
-    border-radius: 14px;
-    padding: 1rem 1.1rem 1.05rem;
+    border-radius: 0;
+    padding: 0.35rem 0 0.85rem;
     margin: 0.35rem 0 1.1rem;
-    background: linear-gradient(135deg, rgba(13, 148, 136, 0.07) 0%, rgba(99, 102, 241, 0.06) 100%);
-    border: 1px solid color-mix(in srgb, var(--secondary-background-color) 65%, transparent);
-    box-shadow: 0 1px 2px color-mix(in srgb, var(--text-color) 6%, transparent);
+    background: transparent;
+    border: none;
+    box-shadow: none;
   }
   .ta-etoro-stats {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 0.75rem 1rem;
     margin-bottom: 0.85rem;
   }
@@ -230,10 +232,10 @@ def _inject_app_styles() -> None:
     .ta-etoro-stats { grid-template-columns: 1fr; }
   }
   .ta-etoro-stat {
-    background: color-mix(in srgb, var(--secondary-background-color) 88%, transparent);
-    border-radius: 10px;
-    padding: 0.65rem 0.75rem;
-    border: 1px solid color-mix(in srgb, var(--secondary-background-color) 40%, transparent);
+    background: transparent;
+    border-radius: 0;
+    padding: 0.35rem 0 0.5rem;
+    border: none;
   }
   .ta-etoro-stat-label {
     display: block;
@@ -355,6 +357,128 @@ def _inject_app_styles() -> None:
   }
   .ta-etoro-page-hero {
     margin-bottom: 0.5rem;
+  }
+
+  /* eToro open positions — grouped table + P&L tint */
+  .ta-etoro-pos-block {
+    margin: 0.35rem 0 0.85rem;
+  }
+  .ta-etoro-pos-table {
+    width: 100%;
+    table-layout: fixed;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .ta-etoro-pos-table col.ta-etoro-w-pos {
+    width: 32%;
+  }
+  .ta-etoro-pos-table col.ta-etoro-w-inv,
+  .ta-etoro-pos-table col.ta-etoro-w-tot,
+  .ta-etoro-pos-table col.ta-etoro-w-ret,
+  .ta-etoro-pos-table col.ta-etoro-w-pnl {
+    width: 17%;
+  }
+  .ta-etoro-pos-table th:nth-child(n + 2),
+  .ta-etoro-pos-table td:nth-child(n + 2) {
+    text-align: right;
+  }
+  .ta-etoro-pos-table th,
+  .ta-etoro-pos-table td {
+    padding: 0.42rem 0.48rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--text-color) 10%, transparent);
+    vertical-align: middle;
+  }
+  .ta-etoro-pos-table th:first-child,
+  .ta-etoro-pos-table td:first-child {
+    text-align: left;
+  }
+  .ta-etoro-pos-table th {
+    font-weight: 600;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.72;
+  }
+  .ta-etoro-inv-cell {
+    color: var(--text-color);
+    opacity: 0.9;
+    font-variant-numeric: tabular-nums;
+  }
+  .ta-etoro-pnl-up {
+    color: #16a34a;
+  }
+  .ta-etoro-pnl-down {
+    color: #dc2626;
+  }
+  .ta-etoro-pnl-flat {
+    color: var(--text-color);
+    opacity: 0.88;
+  }
+
+  /* Multi-lot: <details> replaces one data row — summary row is the merged totals (click to expand) */
+  tr.ta-etoro-detail-slot td {
+    padding: 0;
+    vertical-align: top;
+    border-bottom: 1px solid color-mix(in srgb, var(--text-color) 10%, transparent);
+  }
+  .ta-etoro-nest-cell {
+    background: transparent;
+  }
+  details.ta-etoro-lot-details {
+    width: 100%;
+  }
+  summary.ta-etoro-lot-summary-trigger {
+    display: block;
+    list-style: none;
+    cursor: pointer;
+    user-select: none;
+    padding: 0;
+    margin: 0;
+  }
+  summary.ta-etoro-lot-summary-trigger::-webkit-details-marker {
+    display: none;
+  }
+  summary.ta-etoro-lot-summary-trigger .ta-etoro-pos-table.ta-etoro-pos-summary-inline {
+    margin: 0;
+    width: 100%;
+  }
+  summary.ta-etoro-lot-summary-trigger .ta-etoro-pos-summary-inline td {
+    border-bottom: none;
+  }
+  td.ta-etoro-sum-name-td {
+    font-weight: 600;
+  }
+  td.ta-etoro-sum-name-td::before {
+    content: "▸";
+    display: inline-block;
+    opacity: 0.45;
+    margin-right: 0.35rem;
+    font-size: 0.72rem;
+    vertical-align: middle;
+  }
+  details.ta-etoro-lot-details[open] td.ta-etoro-sum-name-td::before {
+    content: "▾";
+  }
+  .ta-etoro-lot-hint {
+    font-size: 0.78rem;
+    font-weight: 500;
+    opacity: 0.62;
+    white-space: nowrap;
+  }
+  .ta-etoro-pos-detail-inner {
+    padding: 0.2rem 0.35rem 0.5rem 0.5rem;
+    background: color-mix(in srgb, var(--secondary-background-color) 65%, transparent);
+    border-top: 1px solid color-mix(in srgb, var(--text-color) 8%, transparent);
+  }
+  .ta-etoro-pos-table.ta-etoro-pos-table--nested {
+    width: 100%;
+    font-size: 0.82rem;
+    margin: 0;
+  }
+  .ta-etoro-pos-table.ta-etoro-pos-table--nested th,
+  .ta-etoro-pos-table.ta-etoro-pos-table--nested td {
+    padding: 0.3rem 0.42rem;
   }
 </style>
         """,
@@ -629,10 +753,9 @@ def _ensure_etoro_snapshot() -> Dict[str, Any]:
             if iid is not None:
                 ids.append(iid)
         meta = client.get_instruments_metadata(ids) if ids else {}
-        text, rows = summarize_portfolio(payload, meta)
+        _, rows = summarize_portfolio(payload, meta)
         snap = {
             "ok": True,
-            "text": text,
             "rows": rows,
             "headlines": portfolio_headlines(payload),
         }
@@ -677,6 +800,7 @@ def _render_etoro_stats_html(hl: Dict[str, Any]) -> str:
     credit = hl.get("credit")
     unreal = hl.get("unrealized_pnl")
     npos = hl.get("open_positions", "—")
+    tinv = hl.get("total_invested_open_usd")
     u = _safe_float(unreal)
     pnl_cls = _pnl_class(u)
     cr = html_module.escape(str(credit if credit is not None else "—"))
@@ -685,11 +809,20 @@ def _render_etoro_stats_html(hl: Dict[str, Any]) -> str:
     else:
         pnl_display = html_module.escape(str(unreal if unreal is not None else "—"))
     np = html_module.escape(str(npos if npos is not None else "—"))
+    ti = _safe_float(tinv) if tinv is not None else None
+    if ti is not None:
+        inv_display = html_module.escape(f"{ti:,.2f}")
+    else:
+        inv_display = html_module.escape(str(tinv if tinv is not None else "—"))
     return f"""
 <div class="ta-etoro-stats">
   <div class="ta-etoro-stat">
     <span class="ta-etoro-stat-label">Available balance</span>
     <span class="ta-etoro-stat-value">{cr}</span>
+  </div>
+  <div class="ta-etoro-stat">
+    <span class="ta-etoro-stat-label">Total invested (sum of positions)</span>
+    <span class="ta-etoro-stat-value">{inv_display}</span>
   </div>
   <div class="ta-etoro-stat">
     <span class="ta-etoro-stat-label">Unrealized P&amp;L</span>
@@ -703,8 +836,23 @@ def _render_etoro_stats_html(hl: Dict[str, Any]) -> str:
 """
 
 
+def _row_unrealized_pnl_usd(r: Dict[str, Any]) -> Optional[float]:
+    """Prefer flattened row field; else same fallback as ``position_unrealized_pnl`` (stale session rows)."""
+    p = _safe_float(r.get("unrealizedPnL"))
+    if p is not None:
+        return p
+    ubv = _safe_float(r.get("unitsBaseValueDollars"))
+    init = _safe_float(r.get("initialAmountInDollars"))
+    if ubv is not None and init is not None:
+        return ubv - init
+    return None
+
+
 def _etoro_invested_notional(r: Dict[str, Any]) -> Optional[float]:
-    """Approximate cash deployed at open: |units| × open rate (eToro-style rows)."""
+    """USD cash in the position: prefer API ``amount`` (margin/notional in USD), else |units|×openRate."""
+    amt = _safe_float(r.get("amount"))
+    if amt is not None and amt > 0:
+        return amt
     u = _safe_float(r.get("units"))
     op = _safe_float(r.get("openRate"))
     if u is None or op is None:
@@ -713,45 +861,265 @@ def _etoro_invested_notional(r: Dict[str, Any]) -> Optional[float]:
     return inv if inv > 0 else None
 
 
+def _total_invested_usd_from_position_rows(rows: List[Dict[str, Any]]) -> Optional[float]:
+    """Sum invested USD across flattened open lots — same basis as the **Invested ($)** table column."""
+    if not rows:
+        return 0.0
+    total = 0.0
+    n = 0
+    for r in rows:
+        v = _etoro_invested_notional(r)
+        if v is not None:
+            total += v
+            n += 1
+    if n == 0:
+        return None
+    return total
+
+
+def _etoro_ticker_group_key(r: Dict[str, Any]) -> str:
+    raw = str(r.get("symbolFull") or "").strip()
+    k = _normalize_ticker(raw)
+    return k if k else (raw.upper() if raw else "?")
+
+
+def _etoro_groups_in_order(rows: List[Dict[str, Any]]) -> List[Tuple[str, List[Dict[str, Any]]]]:
+    od: OrderedDict[str, List[Dict[str, Any]]] = OrderedDict()
+    for r in rows:
+        k = _etoro_ticker_group_key(r)
+        if k not in od:
+            od[k] = []
+        od[k].append(r)
+    return list(od.items())
+
+
+def _etoro_pnl_cell_class(pnl: Optional[float]) -> str:
+    if pnl is None:
+        return "ta-etoro-pnl-flat"
+    if pnl > 0:
+        return "ta-etoro-pnl-up"
+    if pnl < 0:
+        return "ta-etoro-pnl-down"
+    return "ta-etoro-pnl-flat"
+
+
+def _etoro_lot_strings(r: Dict[str, Any]) -> Tuple[str, str, str, str, str, Optional[float]]:
+    sym = str(r.get("symbolFull") or "?").strip()
+    nm = str(r.get("instrumentDisplayName") or "").strip()
+    pid = r.get("positionId")
+    bits = [sym]
+    if nm:
+        bits.append(nm)
+    if pid is not None and str(pid).strip():
+        bits.append(f"#{pid}")
+    pos_label = " — ".join(bits) if len(bits) > 1 else sym
+    if len(pos_label) > 96:
+        pos_label = pos_label[:93] + "…"
+    inv = _etoro_invested_notional(r)
+    pnl = _row_unrealized_pnl_usd(r)
+    inv_s = f"${inv:,.2f}" if inv is not None and inv > 0 else "—"
+    if inv is not None and inv > 0 and pnl is not None:
+        total_s = f"${inv + pnl:,.2f}"
+        pct_s = f"{(pnl / inv) * 100.0:+.2f}%"
+        pnl_s = f"${pnl:+,.2f}"
+    elif inv is not None and inv > 0:
+        total_s = f"${inv:,.2f}"
+        pct_s = "—"
+        pnl_s = "—" if pnl is None else f"${pnl:+,.2f}"
+    else:
+        total_s = "—"
+        pct_s = "—"
+        pnl_s = "—" if pnl is None else f"${pnl:+,.2f}"
+    return pos_label, inv_s, total_s, pct_s, pnl_s, pnl
+
+
+def _etoro_aggregate_strings(lots: List[Dict[str, Any]]) -> Tuple[str, str, str, str, str, Optional[float]]:
+    """One summary row per ticker: position, invested ($), est total, return %, P&amp;L string, pnl for tint."""
+    ticker = _etoro_ticker_group_key(lots[0])
+    names = [str(x.get("instrumentDisplayName") or "").strip() for x in lots]
+    nm0 = next((n for n in names if n), "")
+    n = len(lots)
+    if n > 1:
+        # Lot count appears only on the expander label — avoid repeating "(N lots)" here.
+        pos = f"{ticker} — {nm0}" if nm0 else ticker
+    else:
+        sym = str(lots[0].get("symbolFull") or ticker).strip()
+        pos = f"{sym} — {nm0}" if nm0 else sym
+    if len(pos) > 88:
+        pos = pos[:85] + "…"
+
+    inv_sum = 0.0
+    pnl_sum = 0.0
+    n_pnl = 0
+    total_est_sum = 0.0
+    any_inv = False
+    for r in lots:
+        inv = _etoro_invested_notional(r)
+        pnl = _row_unrealized_pnl_usd(r)
+        if inv is not None and inv > 0:
+            inv_sum += inv
+            any_inv = True
+            if pnl is not None:
+                total_est_sum += inv + pnl
+                pnl_sum += pnl
+                n_pnl += 1
+            else:
+                total_est_sum += inv
+        elif pnl is not None:
+            pnl_sum += pnl
+            n_pnl += 1
+
+    if not any_inv and n_pnl == 0:
+        return pos, "—", "—", "—", "—", None
+
+    invested_s = f"${inv_sum:,.2f}" if any_inv else "—"
+    total_s = f"${total_est_sum:,.2f}" if any_inv else "—"
+    agg_pnl_val = pnl_sum if n_pnl > 0 else None
+    if any_inv and inv_sum > 0 and agg_pnl_val is not None:
+        pct_s = f"{(agg_pnl_val / inv_sum) * 100.0:+.2f}%"
+    else:
+        pct_s = "—"
+    if agg_pnl_val is not None:
+        pnl_s = f"${agg_pnl_val:+,.2f}"
+    else:
+        pnl_s = "—"
+    return pos, invested_s, total_s, pct_s, pnl_s, agg_pnl_val
+
+
+def _html_etoro_pos_row(
+    pos_plain: str,
+    invested_s: str,
+    total_s: str,
+    pct_s: str,
+    pnl_s: str,
+    pnl_for_class: Optional[float],
+    *,
+    row_class: str = "",
+) -> str:
+    cls = _etoro_pnl_cell_class(pnl_for_class)
+    rc = f' class="{html_module.escape(row_class)}"' if row_class else ""
+    return (
+        f"<tr{rc}>"
+        f"<td>{html_module.escape(pos_plain)}</td>"
+        f'<td class="ta-etoro-inv-cell">{html_module.escape(invested_s)}</td>'
+        f'<td class="{cls}">{html_module.escape(total_s)}</td>'
+        f'<td class="{cls}">{html_module.escape(pct_s)}</td>'
+        f'<td class="{cls}">{html_module.escape(pnl_s)}</td>'
+        "</tr>"
+    )
+
+
+def _html_etoro_colgroup() -> str:
+    """Shared column widths so summary <details> rows align with main body rows."""
+    return (
+        "<colgroup>"
+        '<col class="ta-etoro-w-pos" />'
+        '<col class="ta-etoro-w-inv" />'
+        '<col class="ta-etoro-w-tot" />'
+        '<col class="ta-etoro-w-ret" />'
+        '<col class="ta-etoro-w-pnl" />'
+        "</colgroup>"
+    )
+
+
+def _html_etoro_pos_table(body_rows: str, *, include_thead: bool) -> str:
+    head = ""
+    if include_thead:
+        head = (
+            "<thead><tr>"
+            "<th>Position</th>"
+            "<th>Invested ($)</th>"
+            "<th>Est. total ($)</th>"
+            "<th>Return since open (%)</th>"
+            "<th>P&amp;L ($)</th>"
+            "</tr></thead>"
+        )
+    cg = _html_etoro_colgroup()
+    return f'<table class="ta-etoro-pos-table">{cg}{head}<tbody>{body_rows}</tbody></table>'
+
+
+def _html_etoro_nested_lot_table(lot_body_rows: str) -> str:
+    """Per-lot sub-table (thead repeated for readability when <details> is open)."""
+    head = (
+        "<thead><tr>"
+        "<th>Position</th>"
+        "<th>Invested ($)</th>"
+        "<th>Est. total ($)</th>"
+        "<th>Return since open (%)</th>"
+        "<th>P&amp;L ($)</th>"
+        "</tr></thead>"
+    )
+    cg = _html_etoro_colgroup()
+    return (
+        f'<table class="ta-etoro-pos-table ta-etoro-pos-table--nested">{cg}{head}'
+        f"<tbody>{lot_body_rows}</tbody></table>"
+    )
+
+
+def _html_etoro_multilot_details_row(lots: List[Dict[str, Any]]) -> str:
+    """One table row: merged totals are the <summary> (click to open per-lot nested table)."""
+    pos, invested_s, total_s, pct_s, pnl_s, pnl_cls_val = _etoro_aggregate_strings(lots)
+    n = len(lots)
+    cls = _etoro_pnl_cell_class(pnl_cls_val)
+    name_inner = (
+        f'<span class="ta-etoro-sum-name-text">{html_module.escape(pos)}</span>'
+        f'<span class="ta-etoro-lot-hint"> · {html_module.escape(str(n))} lots</span>'
+    )
+    sum_row = (
+        f'<tr class="ta-etoro-pos-sum">'
+        f'<td class="ta-etoro-sum-name-td">{name_inner}</td>'
+        f'<td class="ta-etoro-inv-cell">{html_module.escape(invested_s)}</td>'
+        f'<td class="{cls}">{html_module.escape(total_s)}</td>'
+        f'<td class="{cls}">{html_module.escape(pct_s)}</td>'
+        f'<td class="{cls}">{html_module.escape(pnl_s)}</td>'
+        "</tr>"
+    )
+    sum_inner = (
+        f'<table class="ta-etoro-pos-table ta-etoro-pos-summary-inline">'
+        f"{_html_etoro_colgroup()}<tbody>{sum_row}</tbody></table>"
+    )
+    lot_rows = "".join(_html_etoro_pos_row(*_etoro_lot_strings(r)) for r in lots)
+    inner = _html_etoro_nested_lot_table(lot_rows)
+    return (
+        '<tr class="ta-etoro-detail-slot"><td colspan="5" class="ta-etoro-nest-cell">'
+        '<details class="ta-etoro-lot-details">'
+        f'<summary class="ta-etoro-lot-summary-trigger">{sum_inner}</summary>'
+        f'<div class="ta-etoro-pos-detail-inner">{inner}</div>'
+        "</details></td></tr>"
+    )
+
+
 def _render_etoro_positions_table(rows: List[Dict[str, Any]]) -> None:
-    """One row per open position: estimated total, return % since open, unrealized $ change."""
+    """Single table: multi-lot tickers use one <details> row whose summary is the merged totals."""
     if not rows:
         st.markdown('<p class="ta-pos-empty">No open positions.</p>', unsafe_allow_html=True)
         return
-    out_rows: List[Dict[str, str]] = []
-    for r in rows:
-        sym = str(r.get("symbolFull") or "?").strip()
-        nm = str(r.get("instrumentDisplayName") or "").strip()
-        pos_label = sym if not nm else f"{sym} — {nm}"
-        if len(pos_label) > 72:
-            pos_label = pos_label[:69] + "…"
-        inv = _etoro_invested_notional(r)
-        pnl = _safe_float(r.get("unrealizedPnL"))
-        if inv is not None and inv > 0 and pnl is not None:
-            total_est = inv + pnl
-            ret_pct = (pnl / inv) * 100.0
-            total_s = f"${total_est:,.2f}"
-            pct_s = f"{ret_pct:+.2f}%"
-            pnl_s = f"${pnl:+,.2f}"
-        elif inv is not None and inv > 0:
-            total_s = f"${inv:,.2f}"
-            pct_s = "—"
-            pnl_s = "—" if pnl is None else f"${pnl:+,.2f}"
+    groups = _etoro_groups_in_order(rows)
+    body_parts: List[str] = []
+    for _ticker, lots in groups:
+        if len(lots) > 1:
+            body_parts.append(_html_etoro_multilot_details_row(lots))
         else:
-            total_s = "—"
-            pct_s = "—"
-            pnl_s = "—" if pnl is None else f"${pnl:+,.2f}"
-        out_rows.append({
-            "Position": pos_label,
-            "Est. total ($)": total_s,
-            "Return since open (%)": pct_s,
-            "P&L ($)": pnl_s,
-        })
+            pos, invested_s, total_s, pct_s, pnl_s, pnl_cls_val = _etoro_aggregate_strings(lots)
+            body_parts.append(
+                _html_etoro_pos_row(
+                    pos,
+                    invested_s,
+                    total_s,
+                    pct_s,
+                    pnl_s,
+                    pnl_cls_val,
+                    row_class="ta-etoro-pos-sum",
+                )
+            )
+    full = _html_etoro_pos_table("".join(body_parts), include_thead=True)
+    st.markdown(f'<div class="ta-etoro-pos-block">{full}</div>', unsafe_allow_html=True)
     st.caption(
-        "**Est. total** = notional at open (|units|×open rate) + unrealized P&L. "
-        "**Return since open** = P&L ÷ that notional. Same fields as in the eToro portfolio export; read-only."
+        "Grouped by ticker (merged totals). **Invested** is USD at open (API `amount` or |units|×open rate), "
+        "without unrealized P&L. **Est. total** adds P&L to that. Return and P&L formulas unchanged; "
+        "green / red tint follows net P&L on Est. total / Return / P&L columns. **Click the summary row** (▸) "
+        "for multi-lot tickers to open per-lot lines. Read-only."
     )
-    st.dataframe(pd.DataFrame(out_rows), use_container_width=True, hide_index=True)
 
 
 def _render_etoro_export_section(*, key_prefix: str = "etoro") -> None:
@@ -809,8 +1177,9 @@ def _render_etoro_portfolio_block(
         st.warning(snap.get("err") or "Could not load eToro portfolio.")
         return
 
-    hl = snap.get("headlines") or {}
+    hl = dict(snap.get("headlines") or {})
     rows: List[Dict[str, Any]] = list(snap.get("rows") or [])
+    hl["total_invested_open_usd"] = _total_invested_usd_from_position_rows(rows)
 
     st.markdown(
         '<div class="ta-etoro-wrap">'
@@ -822,8 +1191,6 @@ def _render_etoro_portfolio_block(
     # Always show the table here (do not hide inside a collapsed expander on Dashboard).
     st.subheader("Open positions")
     _render_etoro_positions_table(rows)
-    with st.expander("Plain text summary (API)", expanded=False):
-            st.text(snap.get("text") or "")
 
     if show_export:
         _render_etoro_export_section(key_prefix="etoro")
@@ -1148,22 +1515,34 @@ def _shift_calendar_month(year: int, month: int, delta: int) -> Tuple[int, int]:
     return year, month
 
 
-def _pending_job_entries(cfg: Dict[str, Any]) -> List[Tuple[datetime, str, str]]:
-    """UTC scheduled time, ticker, execution tier for each pending job."""
+def _pending_jobs_raw(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Pending advisor job rows from state (dicts as stored), sorted by scheduled time."""
     st0 = _load_advisor_state(cfg)
     if "error" in st0 and not st0.get("jobs"):
         return []
-    out: List[Tuple[datetime, str, str]] = []
+    out: List[Dict[str, Any]] = []
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
     for j in st0.get("jobs") or []:
         if j.get("status") != "pending":
             continue
         when = _parse_iso_safe(j.get("scheduled_at"))
         if when is None:
             continue
+        out.append(j)
+    out.sort(key=lambda x: _parse_iso_safe(x.get("scheduled_at")) or epoch)
+    return out
+
+
+def _pending_job_entries(cfg: Dict[str, Any]) -> List[Tuple[datetime, str, str]]:
+    """UTC scheduled time, ticker, execution tier for each pending job."""
+    out: List[Tuple[datetime, str, str]] = []
+    for j in _pending_jobs_raw(cfg):
+        when = _parse_iso_safe(j.get("scheduled_at"))
+        if when is None:
+            continue
         tick = str(j.get("ticker") or "?").strip().upper() or "?"
         tier = str(j.get("execution_tier") or "job")
         out.append((when, tick, tier))
-    out.sort(key=lambda x: x[0])
     return out
 
 
@@ -1171,6 +1550,22 @@ def _ts_to_local_date(ts: datetime) -> date:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     return ts.astimezone().date()
+
+
+def _group_pending_jobs_by_local_day(jobs: List[Dict[str, Any]]) -> Dict[date, List[Dict[str, Any]]]:
+    by_day: Dict[date, List[Dict[str, Any]]] = {}
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    for j in jobs:
+        when = _parse_iso_safe(j.get("scheduled_at"))
+        if when is None:
+            continue
+        d = _ts_to_local_date(when)
+        by_day.setdefault(d, []).append(j)
+    for d in by_day:
+        by_day[d].sort(
+            key=lambda x: _parse_iso_safe(x.get("scheduled_at")) or epoch,
+        )
+    return by_day
 
 
 def _jobs_grouped_by_local_day(entries: List[Tuple[datetime, str, str]]) -> Dict[date, List[str]]:
@@ -1181,52 +1576,38 @@ def _jobs_grouped_by_local_day(entries: List[Tuple[datetime, str, str]]) -> Dict
     return by_day
 
 
-def _calendar_month_grid_html(year: int, month: int, job_by_day: Dict[date, List[str]]) -> str:
-    cal = cal_module.Calendar(firstweekday=cal_module.MONDAY)
-    weeks = cal.monthdatescalendar(year, month)
-    today = date.today()
-    hdrs = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    parts: List[str] = [
-        '<div style="font-family:system-ui,-apple-system,sans-serif;font-size:13px">',
-        f'<div style="font-weight:600;margin-bottom:10px;text-align:center">'
-        f"{html_module.escape(cal_module.month_name[month])} {year}</div>",
-        '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px;'
-        'text-align:center;font-size:11px;opacity:0.72;margin-bottom:6px">',
-    ]
-    for h in hdrs:
-        parts.append(f"<div>{html_module.escape(h)}</div>")
-    parts.append("</div>")
-    parts.append('<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:5px">')
-    for week in weeks:
-        for d in week:
-            is_pad = d.month != month
-            is_today = d == today
-            jobs = job_by_day.get(d, [])
-            n = len(jobs)
-            tip = "; ".join(jobs[:8])
-            if len(jobs) > 8:
-                tip += f" (+{len(jobs) - 8} more)"
-            tip_a = html_module.escape(tip) if tip else ""
-            border = (
-                "2px solid #2563eb" if is_today else "1px solid rgba(128,128,128,0.28)"
-            )
-            cell_bg = "rgba(128,128,128,0.06)" if is_pad else "rgba(128,128,128,0.10)"
-            op = "0.4" if is_pad else "1"
-            num = str(d.day)
-            if n:
-                badge = (
-                    f'<div style="font-size:10px;margin-top:3px;font-weight:600;color:#1d4ed8">'
-                    f"{n} job{'s' if n != 1 else ''}</div>"
-                )
-            else:
-                badge = '<div style="font-size:10px;margin-top:3px;opacity:0.4"> </div>'
-            parts.append(
-                f'<div title="{tip_a}" style="min-height:54px;padding:5px 4px;border-radius:8px;border:{border};'
-                f'background:{cell_bg};opacity:{op}">'
-                f'<div style="font-weight:600">{html_module.escape(num)}</div>{badge}</div>'
-            )
-    parts.append("</div></div>")
-    return "".join(parts)
+@st.dialog("Scheduled jobs", width="large")
+def _planner_jobs_modal(d: date, jobs: List[Dict[str, Any]]) -> None:
+    st.markdown(f"**{d.strftime('%A, %B %d, %Y')}**")
+    if not jobs:
+        st.info("No pending advisor jobs on this day.")
+    else:
+        for j in jobs:
+            when = _parse_iso_safe(j.get("scheduled_at"))
+            wall = when.astimezone().strftime("%I:%M %p %Z") if when else "—"
+            tick = str(j.get("ticker") or "?").strip().upper() or "?"
+            tier = str(j.get("execution_tier") or "single_model")
+            jtype = str(j.get("job_type") or "routine_monitoring")
+            jid = str(j.get("id") or "")
+            reason = str(j.get("reason") or "").strip()
+            parts = [
+                "- **",
+                html_module.escape(tick),
+                "** · ",
+                html_module.escape(wall),
+                " · `",
+                html_module.escape(tier),
+                "` · `",
+                html_module.escape(jtype),
+                "`",
+            ]
+            if jid:
+                parts.extend([" · `", html_module.escape(jid), "`"])
+            st.markdown("".join(parts), unsafe_allow_html=False)
+            if reason:
+                st.caption(reason[:500] + ("…" if len(reason) > 500 else ""))
+    if st.button("Close", use_container_width=True, type="primary", key="dash_cal_dialog_close"):
+        st.rerun()
 
 
 def _render_notifications_box(cfg: Dict[str, Any]) -> None:
@@ -1257,24 +1638,42 @@ def _render_notifications_box(cfg: Dict[str, Any]) -> None:
 
 
 def _render_planner_calendar(cfg: Dict[str, Any]) -> None:
-    entries = _pending_job_entries(cfg)
-    job_by_day = _jobs_grouped_by_local_day(entries)
+    """Full-width month grid: Streamlit buttons open a modal (no URL navigation)."""
+    pending_raw = _pending_jobs_raw(cfg)
+    jobs_by_day = _group_pending_jobs_by_local_day(pending_raw)
+    entries: List[Tuple[datetime, str, str]] = []
+    for j in pending_raw:
+        when = _parse_iso_safe(j.get("scheduled_at"))
+        if when is None:
+            continue
+        tick = str(j.get("ticker") or "?").strip().upper() or "?"
+        tier = str(j.get("execution_tier") or "job")
+        entries.append((when, tick, tier))
+    job_str_by_day = _jobs_grouped_by_local_day(entries)
     today = date.today()
     y = int(st.session_state.get("dash_cal_year", today.year))
     m = int(st.session_state.get("dash_cal_month", today.month))
     if m < 1 or m > 12:
         y, m = today.year, today.month
 
-    p, lab, n = st.columns([1, 4, 1])
-    with p:
+    cal = cal_module.Calendar(firstweekday=cal_module.MONDAY)
+    weeks = cal.monthdatescalendar(y, m)
+
+    nav_l, nav_c, nav_r = st.columns([1, 6, 1])
+    with nav_l:
         if st.button("Prev", key="dash_cal_prev", use_container_width=True):
             y, m = _shift_calendar_month(y, m, -1)
             st.session_state["dash_cal_year"] = y
             st.session_state["dash_cal_month"] = m
             st.rerun()
-    with lab:
-        st.caption(f"{cal_module.month_name[m]} {y} · your local timezone · hover a day for tickers")
-    with n:
+    with nav_c:
+        st.markdown(
+            "<div style='text-align:center;font-size:1.35rem;font-weight:650;letter-spacing:-0.02em;margin:0.15rem 0'>"
+            f"{html_module.escape(cal_module.month_name[m])} {y}</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption("Local timezone · hover a day for tickers · click for job popup")
+    with nav_r:
         if st.button("Next", key="dash_cal_next", use_container_width=True):
             y, m = _shift_calendar_month(y, m, 1)
             st.session_state["dash_cal_year"] = y
@@ -1282,9 +1681,46 @@ def _render_planner_calendar(cfg: Dict[str, Any]) -> None:
             st.rerun()
 
     with st.container(border=True):
-        st.markdown(_calendar_month_grid_html(y, m, job_by_day), unsafe_allow_html=True)
-        if not entries:
-            st.caption("No pending jobs in advisor state. After **Deploy** / init, scheduled work appears here.")
+        hcols = st.columns(7, gap="small")
+        hdrs = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        for col, h in zip(hcols, hdrs):
+            with col:
+                st.caption(h)
+        for wi, week in enumerate(weeks):
+            cols = st.columns(7, gap="small")
+            for di, (col, d) in enumerate(zip(cols, week)):
+                is_pad = d.month != m
+                n = len(jobs_by_day.get(d, []))
+                jobs = job_str_by_day.get(d, [])
+                tip = "; ".join(jobs[:8])
+                if len(jobs) > 8:
+                    tip += f" (+{len(jobs) - 8} more)"
+                help_txt = tip if tip else "No pending jobs"
+                if len(help_txt) > 280:
+                    help_txt = help_txt[:277] + "…"
+                with col:
+                    if is_pad:
+                        st.button(
+                            str(d.day),
+                            key=f"dash_cal_pad_{y}_{m}_{wi}_{di}_{d.isoformat()}",
+                            disabled=True,
+                            use_container_width=True,
+                        )
+                        continue
+                    label = f"{d.day} ({n})" if n else str(d.day)
+                    btn_type = "primary" if d == today else "secondary"
+                    if st.button(
+                        label,
+                        key=f"dash_cal_day_{d.isoformat()}",
+                        use_container_width=True,
+                        type=btn_type,
+                        help=help_txt,
+                    ):
+                        _planner_jobs_modal(d, jobs_by_day.get(d, []))
+        if not pending_raw:
+            st.caption(
+                "No pending jobs in advisor state. After **Deploy** / init, scheduled work appears here."
+            )
 
 
 def _render_schedule_timeline_chart(cfg: Dict[str, Any]) -> None:
@@ -1308,13 +1744,10 @@ def _render_schedule_timeline_chart(cfg: Dict[str, Any]) -> None:
 
 def _render_dashboard_planning_row(cfg: Dict[str, Any]) -> None:
     st.subheader("Overview")
-    left, right = st.columns([1.05, 1.15], gap="large")
-    with left:
-        st.markdown("##### Notifications")
-        _render_notifications_box(cfg)
-    with right:
-        st.markdown("##### Planner calendar")
-        _render_planner_calendar(cfg)
+    st.markdown("##### Notifications")
+    _render_notifications_box(cfg)
+    st.markdown("##### Planner calendar")
+    _render_planner_calendar(cfg)
     st.markdown("##### Upcoming scheduled work")
     st.caption("Bar height = number of **pending** advisor jobs scheduled on that local calendar day (next 21 days).")
     _render_schedule_timeline_chart(cfg)

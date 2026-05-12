@@ -12,6 +12,19 @@ def _pick(d: dict, *keys: str) -> Any:
     return None
 
 
+def _pick_ci(d: dict, *candidates: str) -> Any:
+    """First non-None value whose key matches one of ``candidates`` case-insensitively."""
+    if not isinstance(d, dict) or not candidates:
+        return None
+    want = {str(c).lower() for c in candidates}
+    for k, v in d.items():
+        if v is None:
+            continue
+        if str(k).lower() in want:
+            return v
+    return None
+
+
 def iter_positions(client_portfolio: dict) -> Iterable[dict]:
     """Yield open positions from the top-level list and from copy-trading mirrors."""
     for p in client_portfolio.get("positions") or []:
@@ -56,16 +69,102 @@ def instrument_id_from_position(p: dict) -> Optional[int]:
         return None
 
 
+def position_unrealized_pnl(p: dict) -> Any:
+    """Per-position unrealized P&L (USD).
+
+    The PnL endpoint usually exposes ``unrealizedPnL.pnL`` or a flat ``pnL`` field; casing varies
+    on the wire. When those are absent, use ``unitsBaseValueDollars - initialAmountInDollars`` (see
+    eToro OpenAPI Position on the PnL response) as a practical fallback for dashboards.
+    """
+    if not isinstance(p, dict):
+        return None
+
+    nested = _pick_ci(
+        p,
+        "unrealizedPnL",
+        "unrealizedPnl",
+        "UnrealizedPnL",
+        "UnrealizedPnl",
+        "unrealizedPNL",
+    )
+    if isinstance(nested, dict):
+        v = _pick_ci(nested, "pnL", "pnl", "PnL", "PNL", "value", "dollars", "amount")
+        if v is not None and not isinstance(v, (dict, list)):
+            return v
+        if len(nested) == 1:
+            only = next(iter(nested.values()))
+            if isinstance(only, (int, float)) and not isinstance(only, bool):
+                return only
+            if isinstance(only, dict):
+                v2 = _pick_ci(only, "pnL", "pnl", "PnL", "PNL", "value")
+                if v2 is not None and not isinstance(v2, (dict, list)):
+                    return v2
+    elif nested is not None and not isinstance(nested, (dict, list)):
+        return nested
+
+    for leaf in ("pnL", "pnl", "PnL", "PNL", "unrealizedProfit", "profitLoss", "grossPnL"):
+        v = _pick_ci(p, leaf)
+        if v is not None and not isinstance(v, (dict, list)):
+            return v
+
+    ubv = _pick(p, "unitsBaseValueDollars", "UnitsBaseValueDollars")
+    init = _pick(p, "initialAmountInDollars", "InitialAmountInDollars")
+    if ubv is not None and init is not None:
+        try:
+            return float(ubv) - float(init)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def position_invested_usd(p: dict) -> Optional[float]:
+    """USD capital in the open position at open (excludes unrealized P&amp;L): ``amount`` else |units|×openRate."""
+    amt = _pick(p, "amount", "Amount")
+    if amt is not None:
+        try:
+            a = float(amt)
+            if a > 0:
+                return a
+        except (TypeError, ValueError):
+            pass
+    u = _pick(p, "units", "Units")
+    op = _pick(p, "openRate", "OpenRate")
+    if u is None or op is None:
+        return None
+    try:
+        fu = float(u)
+        fo = float(op)
+    except (TypeError, ValueError):
+        return None
+    inv = abs(fu) * abs(fo)
+    return inv if inv > 0 else None
+
+
 def portfolio_headlines(pnl_payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Balance, aggregate unrealized P&L, and open-position count for dashboards."""
+    """Balance, aggregate unrealized P&L, open-position count, and summed capital in open positions."""
     cp = pnl_payload.get("clientPortfolio") or {}
     credit = _pick(cp, "credit", "Credit")
     unreal = _pick(cp, "unrealizedPnL", "unrealizedPnl", "UnrealizedPnL")
-    n_positions = len(dedupe_positions(iter_positions(cp)))
+    book = dedupe_positions(iter_positions(cp))
+    n_positions = len(book)
+    inv_sum = 0.0
+    inv_n = 0
+    for p in book:
+        v = position_invested_usd(p)
+        if v is not None:
+            inv_sum += v
+            inv_n += 1
+    if n_positions == 0:
+        total_invested_open_usd = 0.0
+    elif inv_n == 0:
+        total_invested_open_usd = None
+    else:
+        total_invested_open_usd = inv_sum
     return {
         "credit": credit,
         "unrealized_pnl": unreal,
         "open_positions": n_positions,
+        "total_invested_open_usd": total_invested_open_usd,
     }
 
 
@@ -100,7 +199,10 @@ def summarize_portfolio(
             side = "short"
         else:
             side = "?"
-        pnl = _pick(p, "pnL", "pnl", "PnL", "PNL")
+        pnl = position_unrealized_pnl(p)
+        amt = _pick(p, "amount", "Amount")
+        ubv = _pick(p, "unitsBaseValueDollars", "UnitsBaseValueDollars")
+        init_usd = _pick(p, "initialAmountInDollars", "InitialAmountInDollars")
         lines.append(
             f"  • {sym} ({name})  {side}  units={units}  open={open_rate}  uPnL={pnl}"
         )
@@ -111,6 +213,9 @@ def summarize_portfolio(
                 "instrumentId": iid,
                 "openRate": open_rate,
                 "units": units,
+                "amount": amt,
+                "unitsBaseValueDollars": ubv,
+                "initialAmountInDollars": init_usd,
                 "isBuy": _pick(p, "isBuy", "IsBuy"),
                 "unrealizedPnL": pnl,
                 "positionId": _pick(p, "positionId", "positionID"),

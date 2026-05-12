@@ -8,6 +8,7 @@ from tradingagents.integrations.etoro.portfolio import (
     dedupe_positions,
     iter_positions,
     portfolio_headlines,
+    position_unrealized_pnl,
     summarize_portfolio,
 )
 
@@ -32,6 +33,7 @@ def test_portfolio_headlines():
     data = json.loads(fixture.read_text(encoding="utf-8"))
     h = portfolio_headlines(data)
     assert h["open_positions"] == 2
+    assert h["total_invested_open_usd"] == 250.0
 
 
 def test_summarize_portfolio():
@@ -44,3 +46,18 @@ def test_summarize_portfolio():
     text, rows = summarize_portfolio(data, meta)
     assert "TEST1" in text
     assert len(rows) == 2
+
+
+def test_position_unrealized_pnl_nested():
+    """Live API nests unrealized P&L under unrealizedPnL.pnL; casing varies."""
+    flat = {"pnL": 3.25}
+    assert position_unrealized_pnl(flat) == 3.25
+    nested = {"unrealizedPnL": {"pnL": -1.5}}
+    assert position_unrealized_pnl(nested) == -1.5
+    nested2 = {"unrealizedPnL": 9.0}
+    assert position_unrealized_pnl(nested2) == 9.0
+    assert position_unrealized_pnl({"unrealizedPnl": {"pnL": 4.0}}) == 4.0
+    assert position_unrealized_pnl({"PNL": 2.0}) == 2.0
+    assert position_unrealized_pnl(
+        {"unitsBaseValueDollars": 110.0, "initialAmountInDollars": 100.0}
+    ) == 10.0
