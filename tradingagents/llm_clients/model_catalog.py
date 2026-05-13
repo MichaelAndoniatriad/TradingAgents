@@ -193,7 +193,7 @@ MODEL_OPTIONS: ProviderModeOptions = {
         ],
         "deep": [
             ("OR: GPT-4o", "openai/gpt-4o"),
-            ("OR: Claude 3.5 Sonnet", "anthropic/claude-3.5-sonnet"),
+            ("OR: Claude Sonnet 4.5", "anthropic/claude-sonnet-4.5"),
             ("OR: DeepSeek R1", "deepseek/deepseek-r1"),
             ("OR: o1-mini (vault-style)", "openai/o1-mini"),
             ("Custom model ID", "custom"),
@@ -237,7 +237,8 @@ OR_GEMINI_BULK_NEWS = "google/gemini-2.0-flash-001"
 
 # Strategy layer
 OR_DEEPSEEK_R1 = "deepseek/deepseek-r1"
-OR_CLAUDE_SONNET = "anthropic/claude-3.5-sonnet"
+# OpenRouter often returns 404 for legacy ``anthropic/claude-3.5-sonnet``; use current Sonnet line.
+OR_CLAUDE_SONNET = "anthropic/claude-sonnet-4.5"
 
 # Risk layer
 OR_DEEPSEEK_V4_PRO = "deepseek/deepseek-v4-pro"
