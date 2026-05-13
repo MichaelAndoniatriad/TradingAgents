@@ -5,6 +5,8 @@ from tradingagents.portfolio_advisor.messaging import (
     message_log_path,
     send_advisor_message,
 )
+from tradingagents.portfolio_advisor.advisor_pm import run_pm_cycle
+from tradingagents.portfolio_advisor.catalogue import write_advisor_catalogue
 from tradingagents.portfolio_advisor.service import (
     run_bootstrap,
     run_due_jobs,
@@ -25,6 +27,8 @@ __all__ = [
     "run_memory_review",
     "run_post_earnings",
     "status_text",
+    "write_advisor_catalogue",
+    "run_pm_cycle",
     "send_advisor_message",
     "load_recent_messages",
     "message_log_path",

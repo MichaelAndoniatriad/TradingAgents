@@ -76,6 +76,8 @@ _EXECUTION_EVENT_TYPES = [
     "plan_validation_override",
     "outcome_recorded",
     "bootstrap_position_failed",
+    "portfolio_bootstrap_complete",
+    "advisor_pm_cycle",
     "portfolio_book_changed",
     "advisor_replan_skipped",
 ]
@@ -95,6 +97,8 @@ EVENT_TYPE_LABELS: Dict[str, str] = {
     "plan_validation_override": "Plan validation override",
     "outcome_recorded": "Outcome recorded",
     "bootstrap_position_failed": "Bootstrap run failed (one position)",
+    "portfolio_bootstrap_complete": "Portfolio bootstrap finished",
+    "advisor_pm_cycle": "Portfolio manager (PM) cycle",
     "portfolio_book_changed": "Portfolio holdings changed",
     "advisor_replan_skipped": "Replan skipped (unchanged)",
     "watchdog_critical_alert": "Watchdog: critical",
@@ -168,7 +172,7 @@ def _channel_status_plain(row: Dict[str, Any]) -> str:
         ok = bool(row.get(key))
         bits.append(f"{label}: {'sent' if ok else 'failed'}")
     if not bits:
-        return "No delivery channel was used"
+        return "Saved in this app only (no webhook or email configured for outbound delivery)"
     return " · ".join(bits)
 
 
@@ -594,7 +598,9 @@ def _channel_status_html(row: Dict[str, Any]) -> str:
             f'{"✓" if ok else "✗"} {label}</span>'
         )
     if not pieces:
-        pieces.append('<span style="color:#9aa0a6;font-size:12px">no channel configured</span>')
+        pieces.append(
+            '<span style="color:#9aa0a6;font-size:12px">saved locally (no webhook/email)</span>'
+        )
     return "".join(pieces)
 
 
@@ -652,6 +658,52 @@ def _summarise_event_key_data(row: Dict[str, Any]) -> str:
     if not isinstance(kd, dict):
         s = str(kd).strip()
         return s[:280] if s else "(no details)"
+
+    if et == "portfolio_bootstrap_complete":
+        tickers = kd.get("tickers") or []
+        n_ok = kd.get("ok")
+        n_err = int(kd.get("errors") or 0)
+        td = kd.get("trade_date")
+        bits: List[str] = []
+        if td:
+            bits.append(f"as-of {td}")
+        if n_ok is not None:
+            bits.append(f"{int(n_ok)} deep run(s) succeeded")
+        if n_err:
+            bits.append(f"{n_err} failed")
+        if isinstance(tickers, list) and tickers:
+            tix = ", ".join(str(t).strip().upper() for t in tickers[:10])
+            if len(tickers) > 10:
+                tix += f" (+{len(tickers) - 10} more)"
+            bits.append(tix)
+        return " · ".join(bits) if bits else _format_key_data_compact(kd)
+
+    if et == "advisor_pm_cycle":
+        tr = str(kd.get("trigger") or "?")
+        n = kd.get("forward_tasks_n")
+        stx = kd.get("stance_tickers") or []
+        prev = ""
+        if isinstance(stx, list) and stx:
+            prev = ", ".join(str(x) for x in stx[:8])
+            if len(stx) > 8:
+                prev += "…"
+        ex = str(kd.get("excerpt") or "").strip()[:140]
+        bits2: List[str] = [f"trigger {tr}"]
+        if n is not None:
+            bits2.append(f"{int(n)} forward task(s)")
+        if prev:
+            bits2.append(prev)
+        if ex:
+            bits2.append(ex)
+        if kd.get("request_replan"):
+            ro = kd.get("replan_outcome")
+            bits2.append(f"replan requested → {ro}" if ro is not None else "replan requested")
+        if kd.get("replan_error"):
+            bits2.append(f"replan error: {str(kd.get('replan_error'))[:80]}")
+        ja = kd.get("jobs_appended")
+        if ja is not None and int(ja) > 0:
+            bits2.append(f"+{int(ja)} job(s)")
+        return " · ".join(bits2) if bits2 else _format_key_data_compact(kd)
 
     if "rating" in kd and "trade_date" in kd:
         return f"Rating {kd.get('rating')} for as-of date {kd.get('trade_date')}"
@@ -1742,8 +1794,216 @@ def _render_schedule_timeline_chart(cfg: Dict[str, Any]) -> None:
     st.bar_chart(df.set_index("Day"), height=240, use_container_width=True)
 
 
+def _render_last_bootstrap_panel(cfg: Dict[str, Any]) -> None:
+    """Prominent summary from advisor state (written when bootstrap completes)."""
+    st0 = _load_advisor_state(cfg)
+    if isinstance(st0, dict) and st0.get("error") and not st0.get("last_bootstrap_iso"):
+        return
+    summ = st0.get("last_bootstrap_summary") if isinstance(st0, dict) else None
+    iso = st0.get("last_bootstrap_iso") if isinstance(st0, dict) else None
+    if not iso and not summ:
+        st.markdown("##### Last portfolio bootstrap")
+        st.caption(
+            "No full-portfolio bootstrap recorded in advisor state yet. "
+            "CLI: `python -m cli.main advisor portfolio bootstrap` "
+            "(add `--resume --date YYYY-MM-DD` to skip tickers that already finished that day), "
+            "or enable **Full portfolio scan on deploy** on first-time **Deploy**."
+        )
+        return
+
+    with st.container(border=True):
+        st.markdown("##### Last portfolio bootstrap")
+        if iso:
+            ts = _parse_iso_safe(str(iso))
+            if ts is not None:
+                wall = ts.astimezone().strftime("%Y-%m-%d %I:%M %p %Z")
+                age = _relative_age(ts)
+                st.markdown(f"**When:** {html_module.escape(wall)} · _{html_module.escape(age)}_", unsafe_allow_html=True)
+            else:
+                st.markdown(f"**When:** `{html_module.escape(str(iso))}`")
+
+        if isinstance(summ, dict) and summ:
+            td = str(summ.get("trade_date") or "").strip()
+            if td:
+                st.markdown(f"**Analysis as-of date:** `{html_module.escape(td)}`", unsafe_allow_html=True)
+            tickers = summ.get("tickers") or []
+            ok = summ.get("ok")
+            err = int(summ.get("errors") or 0)
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric("Tickers run", len(tickers) if isinstance(tickers, list) else "—")
+            with c2:
+                st.metric("Succeeded", int(ok) if ok is not None else "—")
+            with c3:
+                st.metric("Failed", err)
+            ratings = summ.get("ratings") or {}
+            if isinstance(ratings, dict) and ratings:
+                st.caption("Rating mix: " + ", ".join(f"{k} ×{v}" for k, v in sorted(ratings.items(), key=lambda kv: str(kv[0]))))
+            if isinstance(tickers, list) and tickers:
+                with st.expander("Ticker list", expanded=False):
+                    st.text(", ".join(str(t).strip().upper() for t in tickers))
+        else:
+            st.caption(
+                "This install has a bootstrap timestamp but no stored summary. "
+                "Run **advisor portfolio bootstrap** again to populate details."
+            )
+
+        rd = Path(str(cfg.get("results_dir", "."))).expanduser()
+        deep_rel = rd / "clerk_deep"
+        st.caption(f"Per-ticker markdown: `{deep_rel}` (under each ticker folder, `*_clerk_triggered.md`).")
+        st.caption(
+            "Each new full-graph run prepends the **latest** saved clerk snapshot into agent context "
+            "(toggle `portfolio_advisor_inject_prior_clerk_report`). "
+            "Interrupted bootstrap: `advisor portfolio bootstrap --resume --date YYYY-MM-DD`. "
+            "Planner queue: cron `advisor portfolio run-due`."
+        )
+
+
+def _render_pm_council_panel(cfg: Dict[str, Any]) -> None:
+    """Latest advisor-level PM cycle (decisions, tasks, memory) from JSONL + markdown trail."""
+    from tradingagents.portfolio_advisor.advisor_pm import (
+        _pm_unified_memory,
+        load_recent_pm_cycles,
+        pm_log_path,
+        pm_memory_path,
+    )
+
+    st.markdown("##### Portfolio manager (PM)")
+    cap = f"Structured log: `{pm_log_path(cfg)}` · rolling markdown: `{pm_memory_path(cfg)}`"
+    if _pm_unified_memory(cfg):
+        cap += " · unified with LangGraph `memory_log_path` when set."
+    st.caption(cap)
+    rows = load_recent_pm_cycles(cfg, limit=8)
+    if not rows:
+        st.info(
+            "No PM cycles yet. CLI: `python -m cli.main advisor portfolio pm-cycle` "
+            "(optional `--trigger after_bootstrap`)."
+        )
+        if _etoro_env_configured() and st.button(
+            "Run PM cycle now", help="Calls the reasoning model; may take a minute.", key="dash_pm_cycle_first"
+        ):
+            _run_pm_cycle_from_ui(cfg, "ui_manual")
+        return
+
+    latest = rows[0]
+    ts = str(latest.get("timestamp") or "")
+    trig = str(latest.get("trigger") or "")
+    model = str(latest.get("model") or "")
+    res = latest.get("result") or {}
+    if not isinstance(res, dict):
+        res = {}
+    ex = str(res.get("executive_summary") or "").strip()
+    with st.container(border=True):
+        st.caption(f"Latest · {html_module.escape(ts)} · trigger `{html_module.escape(trig)}` · model `{html_module.escape(model)}`")
+        if ex:
+            st.text(ex[:8000] + ("…" if len(ex) > 8000 else ""))
+        stances = res.get("stances") or []
+        if isinstance(stances, list) and stances:
+            st.markdown("**Stances**")
+            for s in stances[:40]:
+                if not isinstance(s, dict):
+                    continue
+                tk = str(s.get("ticker") or "?")
+                stc = str(s.get("stance") or "?")
+                ra = str(s.get("rationale") or "").strip()
+                st.text(f"{tk} — {stc} — {ra[:500]}")
+        tasks = res.get("forward_tasks") or []
+        if isinstance(tasks, list) and tasks:
+            st.markdown("**Forward tasks**")
+            for t in tasks[:30]:
+                st.text(f"• {str(t)[:500]}")
+        mem = str(res.get("memory_note") or "").strip()
+        if mem:
+            st.markdown("**Memory note (next cycle)**")
+            st.text(mem[:6000])
+        act = latest.get("actions_taken") or {}
+        if isinstance(act, dict) and act.get("apply_enabled", True):
+            rp = act.get("replan_outcome")
+            err = act.get("replan_error")
+            ja = int(act.get("jobs_appended") or 0)
+            if rp is not None or err or ja:
+                st.markdown("**Follow-up actions (replan / extra jobs)**")
+                if rp is not None:
+                    st.text(f"Replan outcome: {rp}")
+                if err:
+                    st.text(f"Replan error: {err}")
+                if ja:
+                    st.text(f"Extra jobs appended: {ja}")
+
+    with st.expander("Older PM cycles", expanded=False):
+        for row in rows[1:8]:
+            tss = str(row.get("timestamp") or "")
+            trg = str(row.get("trigger") or "")
+            rr = row.get("result") or {}
+            prev = str(rr.get("executive_summary") if isinstance(rr, dict) else "")[:240]
+            st.markdown(f"**{html_module.escape(tss)}** `{html_module.escape(trg)}` — {html_module.escape(prev)}…")
+
+    if _etoro_env_configured() and st.button(
+        "Run PM cycle now",
+        help="Re-runs the PM with a fresh eToro snapshot (reasoning model).",
+        key="dash_pm_cycle_refresh",
+    ):
+        _run_pm_cycle_from_ui(cfg, "ui_manual")
+
+
+def _run_pm_cycle_from_ui(cfg: Dict[str, Any], trigger: str) -> None:
+    from tradingagents.portfolio_advisor.advisor_pm import run_pm_cycle
+
+    with st.spinner("Running PM cycle (LLM)…"):
+        try:
+            run_pm_cycle(cfg, trigger=trigger)
+            st.rerun()
+        except Exception as e:
+            st.error(str(e))
+
+
+def _render_advisor_how_it_works() -> None:
+    """Reduce confusion: bootstrap vs jobs vs where output appears."""
+    with st.expander("How the portfolio advisor works (bootstrap vs jobs vs cloud)", expanded=False):
+        st.markdown(
+            """
+**Three different things**
+
+1. **`advisor portfolio init`** (first time only, or `init --force` to reset)  
+   Builds the **LLM schedule** → pending rows in **Planner calendar** / timeline.  
+   Does **not** run deep research unless you enabled bootstrap-on-init in config.
+
+2. **`advisor portfolio bootstrap`**  
+   Runs the **expensive full multi-agent graph** on each holding **now**, writes markdown under  
+   `results_dir/clerk_deep/<TICKER>/`, updates **Last portfolio bootstrap** on this page, appends **Messages**.  
+   It does **not** replace or create the planner job queue by itself.  
+   By default (`portfolio_advisor_pm_enabled` + `portfolio_advisor_pm_after_each_langgraph`), an **advisor PM** pass runs **right after each ticker’s LangGraph run** (portfolio-level memo, stances, scheduling hints, logged here and in PM JSONL).  
+   When `portfolio_advisor_pm_cycle_after_bootstrap` is on, a **final** PM pass also runs after the whole bootstrap batch (uses the fresh per-portfolio summary).  
+   When `portfolio_advisor_pm_cycle_on_portfolio_change` is on, a PM pass can also run on **bootstrap** book-hash changes and on **`advisor portfolio weekly`** when tickers or the snapshot fingerprint move vs state.
+
+3. **`advisor portfolio replan`**  
+   Refreshes the **job queue** from a new planner pass (cancels old pending jobs).  
+   Use this when you expected “jobs to appear” after holdings changed or you never got a schedule you like.
+
+**To actually run scheduled work** (while your laptop is off), a **server cron** must call  
+`python -m cli.main advisor portfolio run-due` (and optionally `weekly`, `replan`) on a timer.  
+The Streamlit UI only **displays** state; it does not run those commands in the background.
+
+**Edit code from Cursor on your laptop**  
+Use **git**: commit here → `git push` → on the cloud machine `git pull` → restart Streamlit / cron.  
+(Or use **Remote SSH** in Cursor against the same repo on the server.)
+
+**Quick CLI audit** (same folder as `.env`):  
+`python -m cli.main advisor portfolio status` — see jobs and timestamps.  
+`python -m cli.main advisor portfolio catalogue --json` — export a catalogue file.  
+`python -m cli.main advisor portfolio pm-cycle` — one **PM council** pass (big-picture memo, stances, forward tasks, memory); also in the Dashboard.  
+When **`portfolio_advisor_pm_unified_memory`** is on (default), PM markdown appends to the same **`memory_log_path`** file as LangGraph decisions (delimiter-separated blocks), and each PM prompt includes a recent tail of that log.  
+When **`portfolio_advisor_pm_apply_actions`** is on, the PM can set **`request_replan`** and/or **`append_jobs`** in structured output to refresh the planner queue or queue extra research jobs.  
+Set **`TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_ENABLED=false`** only if you need to pause all advisor PM automation (cost or debugging); the LangGraph **node** named Portfolio Manager inside each ticker run is separate.
+            """.strip()
+        )
+
+
 def _render_dashboard_planning_row(cfg: Dict[str, Any]) -> None:
     st.subheader("Overview")
+    _render_advisor_how_it_works()
+    _render_last_bootstrap_panel(cfg)
+    _render_pm_council_panel(cfg)
     st.markdown("##### Notifications")
     _render_notifications_box(cfg)
     st.markdown("##### Planner calendar")
@@ -1869,6 +2129,14 @@ def _page_dashboard() -> None:
                 label_visibility="collapsed",
                 disabled=True,
             )
+        if st.button("Export jobs & timestamps catalogue (MD + JSON)", key="dash_export_catalogue"):
+            try:
+                from tradingagents.portfolio_advisor.catalogue import write_advisor_catalogue
+
+                paths = write_advisor_catalogue(cfg, write_json=True)
+                st.success("Wrote:\n" + "\n".join(f"- **{k}:** `{v}`" for k, v in paths.items()))
+            except Exception as e:
+                st.error(str(e))
 
     if _etoro_env_configured():
         with st.expander("Export watchlist JSON", expanded=False):

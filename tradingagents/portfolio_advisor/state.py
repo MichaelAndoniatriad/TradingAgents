@@ -36,9 +36,13 @@ def default_state() -> Dict[str, Any]:
         "last_catalyst_digest": None,
         "last_portfolio_text_hash": None,
         "last_bootstrap_iso": None,
+        # Written when ``run_full_portfolio_bootstrap`` finishes (for UI / status).
+        "last_bootstrap_summary": None,
         "last_portfolio_tickers": [],
         # Total eToro units per normalized ticker from last successful portfolio row fetch.
         "last_book_units_by_ticker": {},
+        "last_pm_cycle_iso": None,
+        "last_pm_executive_prefix": None,
         "jobs": [],
     }
 

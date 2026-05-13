@@ -56,3 +56,68 @@ class AdvisorPlanResult(BaseModel):
         default_factory=list,
         description="Urgent notes for the human right now (e.g. consider exit, trim, or wait).",
     )
+
+
+class AdvisorPMTickerStance(BaseModel):
+    """Per-name stance from the advisor-level portfolio manager (advisory only)."""
+
+    ticker: str = Field(description="Uppercase symbol as in the portfolio export.")
+    stance: Literal["hold", "buy", "sell", "watch", "trim", "add", "unknown"] = Field(
+        description="Advisory stance only; never implies an executed trade.",
+    )
+    rationale: str = Field(default="", description="One or two sentences.")
+
+
+class AdvisorPMAppendJob(BaseModel):
+    """Optional extra pending advisor job the PM wants queued (live portfolio names only)."""
+
+    ticker: str = Field(description="Uppercase symbol in the current eToro book.")
+    execution_tier: Literal["single_model", "full_graph"] = Field(
+        default="single_model",
+        description="single_model for a light memo; full_graph for a TradingAgents graph run.",
+    )
+    job_type: Literal[
+        "thesis_check",
+        "weekly_summary",
+        "post_earnings",
+        "routine_monitoring",
+    ] = Field(default="thesis_check")
+    rationale: str = Field(default="", description="Why this job should run.")
+
+
+class AdvisorPMCycleResult(BaseModel):
+    """One PM council pass: big picture, stances, forward work, durable memory note."""
+
+    executive_summary: str = Field(
+        description="Short portfolio-wide memo: risk posture, themes, what changed.",
+    )
+    stances: List[AdvisorPMTickerStance] = Field(
+        default_factory=list,
+        description="Stance for each material name; omit pure cash or noise.",
+    )
+    forward_tasks: List[str] = Field(
+        default_factory=list,
+        description="Concrete next tasks (research, replan, verify thesis, schedule job, etc.).",
+    )
+    memory_note: str = Field(
+        default="",
+        description="What the PM wants remembered for the next cycle (one tight paragraph).",
+    )
+    request_replan: bool = Field(
+        default=False,
+        description=(
+            "If true, run a full advisor replan after this cycle (cancels existing pending jobs, "
+            "runs planner LLM, queues a fresh schedule). Use when the book or priorities shifted materially."
+        ),
+    )
+    replan_rationale: str = Field(
+        default="",
+        description="One short sentence logged when request_replan is true.",
+    )
+    append_jobs: List[AdvisorPMAppendJob] = Field(
+        default_factory=list,
+        description=(
+            "Up to five extra pending jobs appended after any replan. Tickers must still be in the "
+            "live export; unknown symbols are skipped."
+        ),
+    )

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Set, Tuple
 
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.portfolio_advisor import etoro_scan, outcome_sync, state
+from tradingagents.portfolio_advisor.prompt_limits import cfg_int
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,7 @@ def _optional_weekly_narrative(cfg: Dict[str, Any], digest: str) -> str:
             **kwargs,
         )
         llm = client.get_llm()
+        dcap = cfg_int(cfg, "portfolio_advisor_weekly_llm_digest_chars", 5600, 1500, 20000)
         prompt = (
             "You are a portfolio advisor. Advisory only; no trade orders.\n"
             "React to the weekly check digest below in at most 100 words.\n\n"
@@ -62,7 +65,7 @@ def _optional_weekly_narrative(cfg: Dict[str, Any], digest: str) -> str:
             "If nothing material: omit this section entirely.\n\n"
             f"{_OUTPUT_RULES}\n\n"
             "---\n"
-            f"{digest[:6000]}"
+            f"{digest[:dcap]}"
         )
         msg = llm.invoke(prompt)
         raw = getattr(msg, "content", str(msg))
@@ -120,6 +123,22 @@ def run_weekly_quick_check(cfg: Dict[str, Any]) -> Tuple[str, bool, Set[str]]:
     st["last_portfolio_tickers"] = sorted(live)
     st["last_weekly_check_iso"] = now.isoformat()
     state.save_state(cfg, st)
+
+    new_fp = hashlib.sha256((portfolio_text or "").encode("utf-8")).hexdigest()
+    old_fp = st.get("last_portfolio_text_hash")
+    ticker_delta = bool(added or removed)
+    hash_delta = bool(old_fp and old_fp != new_fp)
+    if ticker_delta or hash_delta:
+        from tradingagents.portfolio_advisor.advisor_pm import optional_pm_cycle_on_portfolio_change
+
+        optional_pm_cycle_on_portfolio_change(
+            cfg,
+            trigger="weekly_portfolio_change",
+            old_portfolio_text_hash=str(old_fp) if old_fp else None,
+            new_portfolio_text_hash=new_fp,
+            tickers_added=added,
+            tickers_removed=removed,
+        )
 
     lines = [
         "Weekly portfolio check (read-only eToro snapshot).",

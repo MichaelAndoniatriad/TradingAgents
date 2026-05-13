@@ -27,6 +27,8 @@ EVENT_WEIGHTS: Dict[str, int] = {
     "pending_outcome_30d": 4,
     "partial_close_outcome": 4,
     "bootstrap_position_failed": 3,
+    "portfolio_bootstrap_complete": 6,
+    "advisor_pm_cycle": 8,
     "advisor_replan_skipped": 1,
 }
 

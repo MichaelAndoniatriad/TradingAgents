@@ -380,7 +380,30 @@ class TradingAgentsGraph:
             )
         except Exception:
             logger.debug("event log prompt tail skipped", exc_info=True)
-        past_context = "\n\n".join(x for x in (past_md, past_ev) if (x or "").strip())
+        prior_block = ""
+        if self.config.get("portfolio_advisor_inject_prior_clerk_report", True):
+            try:
+                from tradingagents.clerk.deep_runner import load_latest_prior_clerk_report_text
+
+                try:
+                    mx = int(self.config.get("portfolio_advisor_prior_clerk_report_max_chars") or 16_000)
+                except (TypeError, ValueError):
+                    mx = 16_000
+                rd = Path(str(self.config.get("results_dir", "."))).expanduser()
+                blob = load_latest_prior_clerk_report_text(
+                    results_dir=rd, ticker=str(company_name), max_chars=mx
+                )
+                if blob.strip():
+                    prior_block = (
+                        "## Prior automated deep-research snapshot (latest on disk)\n"
+                        "Continue from this narrative where it helps; validate everything with fresh data/tools.\n\n"
+                        + blob.strip()
+                    )
+            except Exception:
+                logger.debug("prior clerk snapshot inject skipped", exc_info=True)
+        past_context = "\n\n".join(
+            x for x in (past_md, past_ev, prior_block) if (x or "").strip()
+        )
         init_agent_state = self.propagator.create_initial_state(
             company_name, trade_date, past_context=past_context
         )

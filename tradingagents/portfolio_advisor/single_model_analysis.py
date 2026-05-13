@@ -18,6 +18,7 @@ from tradingagents.agents.utils.event_log import append_event, format_recent_eve
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.portfolio_advisor import messaging, price_util
+from tradingagents.portfolio_advisor.prompt_limits import cfg_int
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,7 @@ _JOB_TYPE_PROMPTS = {
 
 
 def _build_prompt(
+    cfg: Dict[str, Any],
     jt: str,
     sym: str,
     today: str,
@@ -156,12 +158,14 @@ def _build_prompt(
     ev_ctx: str,
 ) -> str:
     """Pick a per-job-type prompt and inject the shared header + output rules."""
+    md_max = cfg_int(cfg, "portfolio_advisor_single_model_memory_chars", 6800, 500, 30000)
+    ev_max = cfg_int(cfg, "portfolio_advisor_single_model_events_chars", 4800, 500, 30000)
     shared_header = (
         f"Ticker: {sym}\n"
         f"As of: {today}\n"
         f"Price line: {px_line}\n"
-        f"Markdown memory (trimmed): {(md_ctx or 'none')[:7000]}\n"
-        f"JSONL tail (trimmed): {(ev_ctx or 'none')[:5000]}"
+        f"Markdown memory (trimmed): {(md_ctx or 'none')[:md_max]}\n"
+        f"JSONL tail (trimmed): {(ev_ctx or 'none')[:ev_max]}"
     )
     template = _JOB_TYPE_PROMPTS.get(jt, _ROUTINE_MONITORING_PROMPT)
     return template.format(sym=sym, today=today, shared=shared_header, rules=_OUTPUT_RULES)
@@ -202,7 +206,7 @@ def run_single_model_analysis(
     ev_ctx = format_recent_events_for_ticker(cfg, sym, days=ev_days, max_events=20)
 
     today = date.today().isoformat()
-    prompt = _build_prompt(jt, sym, today, px_line, md_ctx, ev_ctx)
+    prompt = _build_prompt(cfg, jt, sym, today, px_line, md_ctx, ev_ctx)
     llm = _reasoning_llm(cfg)
     msg = llm.invoke([HumanMessage(content=prompt)])
     content = getattr(msg, "content", str(msg))

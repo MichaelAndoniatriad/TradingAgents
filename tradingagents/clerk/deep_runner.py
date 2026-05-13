@@ -8,13 +8,52 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from tradingagents.dataflows.config import set_config
-from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 logger = logging.getLogger(__name__)
 
 # Same canonical order as the interactive CLI
 ANALYST_ORDER = ["market", "social", "news", "fundamentals"]
+
+
+def clerk_deep_ticker_dir(results_dir: Path, ticker: str) -> Path:
+    return Path(results_dir).expanduser() / "clerk_deep" / ticker.strip().upper()
+
+
+def clerk_report_path_for_trade_date(results_dir: Path, ticker: str, trade_date: str) -> Path:
+    return clerk_deep_ticker_dir(results_dir, ticker) / f"{trade_date.strip()}_clerk_triggered.md"
+
+
+def has_clerk_report_for_trade_date(results_dir: Path, ticker: str, trade_date: str) -> bool:
+    return clerk_report_path_for_trade_date(results_dir, ticker, trade_date).is_file()
+
+
+def load_latest_prior_clerk_report_text(
+    *,
+    results_dir: Path,
+    ticker: str,
+    max_chars: int = 16_000,
+) -> str:
+    """Most recently modified ``*_clerk_triggered.md`` under ``clerk_deep/<TICKER>/``."""
+    sym = ticker.strip().upper()
+    if not sym:
+        return ""
+    base = Path(results_dir).expanduser() / "clerk_deep" / sym
+    if not base.is_dir():
+        return ""
+    files = [p for p in base.glob("*_clerk_triggered.md") if p.is_file()]
+    if not files:
+        return ""
+    latest = max(files, key=lambda p: p.stat().st_mtime)
+    try:
+        text = latest.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    text = text.strip()
+    if len(text) > max_chars:
+        cut = max(0, max_chars - 100)
+        text = text[:cut].rstrip() + "\n\n[... prior clerk snapshot truncated ...]"
+    return text
 
 
 def normalize_analysts(requested: List[str]) -> List[str]:
@@ -44,6 +83,11 @@ def run_deep_research(
     )
     logger.info("Clerk: starting deep research for %s on %s", ticker, trade_date)
     final_state, decision = graph.propagate(ticker, trade_date)
+    from tradingagents.portfolio_advisor.advisor_pm import run_pm_after_full_graph_if_enabled
+
+    run_pm_after_full_graph_if_enabled(
+        cfg, ticker=ticker, trade_date=trade_date, final_state=final_state
+    )
     return final_state, decision
 
 

@@ -801,6 +801,29 @@ class TestPortfolioManagerInjection:
         assert "REFLECTION:" in past_ctx
 
 
+def test_load_entries_skips_advisor_pm_unified_blocks(tmp_path):
+    """Advisor PM sections in trading_memory.md are ignored by TradingMemoryLog.parse."""
+    pm_block = (
+        "<!-- TRADINGAGENTS_PM_ADVISOR_LOG -->\n"
+        "## PM cycle — test\n### Executive summary\nhello\n"
+    )
+    path = tmp_path / "mixed.md"
+    body = (
+        "[2026-01-01 | AAPL | Buy | pending]\n\nDECISION:\nBuy\n"
+        + _SEP
+        + pm_block
+        + _SEP
+        + "[2026-01-02 | MSFT | Sell | pending]\n\nDECISION:\nSell\n"
+        + _SEP
+    )
+    path.write_text(body, encoding="utf-8")
+    log = TradingMemoryLog({"memory_log_path": str(path)})
+    entries = log.load_entries()
+    assert len(entries) == 2
+    assert entries[0]["ticker"] == "AAPL"
+    assert entries[1]["ticker"] == "MSFT"
+
+
 # ---------------------------------------------------------------------------
 # Legacy removal: BM25 / FinancialSituationMemory fully gone
 # ---------------------------------------------------------------------------

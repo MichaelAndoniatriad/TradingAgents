@@ -107,7 +107,8 @@ def advisor_example_path():
 portfolio_app = typer.Typer(
     help=(
         "Autonomous eToro portfolio advisor: init/replan builds an LLM schedule; weekly is a "
-        "light portfolio check; run-due executes scheduled deep research. All advisory only."
+        "light portfolio check; run-due executes scheduled deep research; catalogue exports jobs/timestamps. "
+        "All advisory only."
     ),
     no_args_is_help=True,
 )
@@ -250,6 +251,16 @@ def portfolio_advisor_bootstrap(
         "-m",
         help="Optional cap on how many holdings to analyze (default: all).",
     ),
+    trade_date: Optional[str] = typer.Option(
+        None,
+        "--date",
+        help="YYYY-MM-DD as-of for saved reports (default: local today's date).",
+    ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="Skip tickers that already have clerk_deep/<SYM>/<date>_clerk_triggered.md for that date.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
     """Run full LangGraph analysis for each live eToro holding (explicit, costly)."""
@@ -257,7 +268,11 @@ def portfolio_advisor_bootstrap(
     cfg = DEFAULT_CONFIG.copy()
     try:
         out = portfolio_advisor_service.run_bootstrap(
-            cfg, delay_seconds=delay, max_positions=max_positions
+            cfg,
+            delay_seconds=delay,
+            max_positions=max_positions,
+            trade_date=trade_date,
+            resume=resume,
         )
         console.print(f"[green]Bootstrap finished:[/green] {out.get('results')}")
     except Exception as e:
@@ -304,3 +319,59 @@ def portfolio_advisor_status():
     """Show persisted advisor jobs and last scan timestamps."""
     cfg = DEFAULT_CONFIG.copy()
     console.print(portfolio_advisor_service.status_text(cfg))
+
+
+@portfolio_app.command("catalogue")
+def portfolio_advisor_catalogue(
+    out: Optional[str] = typer.Option(
+        None,
+        "--out",
+        "-o",
+        help="Markdown output path (default: ~/.tradingagents/portfolio_advisor/advisor_jobs_catalogue.md).",
+    ),
+    json: bool = typer.Option(
+        False,
+        "--json",
+        help="Also write a machine-readable JSON snapshot (same stem as the Markdown file).",
+    ),
+):
+    """Write a Markdown catalogue of advisor timestamps and all jobs (plus optional JSON)."""
+    cfg = DEFAULT_CONFIG.copy()
+    try:
+        from tradingagents.portfolio_advisor.catalogue import write_advisor_catalogue
+
+        paths = write_advisor_catalogue(
+            cfg,
+            markdown_path=Path(out).expanduser() if out else None,
+            write_json=json,
+        )
+        console.print("[green]Catalogue written:[/green]")
+        for k, v in paths.items():
+            console.print(f"  {k}: {v}")
+    except Exception as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+
+
+@portfolio_app.command("pm-cycle")
+def portfolio_advisor_pm_cycle(
+    trigger: str = typer.Option(
+        "manual",
+        "--trigger",
+        "-t",
+        help="Label stored in logs (e.g. manual, after_bootstrap, cron).",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Run one advisor-level portfolio manager cycle (structured memo + stances + tasks + memory)."""
+    _configure_logging(verbose)
+    cfg = DEFAULT_CONFIG.copy()
+    try:
+        from tradingagents.portfolio_advisor.advisor_pm import run_pm_cycle
+
+        out = run_pm_cycle(cfg, trigger=trigger)
+        console.print("[green]PM cycle complete.[/green]")
+        console.print(out.executive_summary[:2000])
+    except Exception as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e

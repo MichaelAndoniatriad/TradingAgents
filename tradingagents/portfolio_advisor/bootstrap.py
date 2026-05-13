@@ -11,11 +11,29 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from tradingagents.agents.utils.event_log import append_event
-from tradingagents.clerk.deep_runner import run_deep_research, save_deep_report
+from tradingagents.clerk.deep_runner import (
+    has_clerk_report_for_trade_date,
+    run_deep_research,
+    save_deep_report,
+)
 from tradingagents.dataflows.config import set_config
 from tradingagents.portfolio_advisor import etoro_scan, messaging, outcome_sync, state
 
 logger = logging.getLogger(__name__)
+
+
+def _optional_pm_cycle_after_bootstrap(cfg: Dict[str, Any]) -> None:
+    """Run advisor-level PM once bootstrap state is saved (best-effort; never raises)."""
+    if not bool(cfg.get("portfolio_advisor_pm_enabled", True)):
+        return
+    if not bool(cfg.get("portfolio_advisor_pm_cycle_after_bootstrap", True)):
+        return
+    try:
+        from tradingagents.portfolio_advisor.advisor_pm import run_pm_cycle
+
+        run_pm_cycle(cfg, trigger="after_bootstrap")
+    except Exception:
+        logger.exception("Post-bootstrap PM cycle failed (bootstrap still completed)")
 
 
 def _book_fingerprint(portfolio_text: str) -> str:
@@ -28,8 +46,16 @@ def run_full_portfolio_bootstrap(
     trade_date: Optional[str] = None,
     delay_seconds: float = 0.0,
     max_positions: Optional[int] = None,
+    resume: bool = False,
 ) -> Dict[str, Any]:
     """Sequential deep research for each live ticker. Updates advisor state fingerprint.
+
+    When ``resume`` is True, tickers that already have ``{trade_date}_clerk_triggered.md`` under
+    ``results_dir/clerk_deep/<TICKER>/`` are skipped so an interrupted bootstrap can continue.
+
+    Each full-graph run receives the latest on-disk clerk markdown in ``past_context`` (unless
+    disabled via ``portfolio_advisor_inject_prior_clerk_report``) so the model can build on
+    the prior automated snapshot.
 
     Emits ``portfolio_book_changed`` event when the eToro text snapshot hash changed
     since the last stored fingerprint. Appends ``full_graph_decision`` is handled
@@ -66,6 +92,19 @@ def run_full_portfolio_bootstrap(
             "[TradingAgents] Portfolio book changed since last bootstrap",
             "eToro snapshot fingerprint changed. Review adds/removes/ch sizes before relying on old schedules.",
         )
+        prev_names = {str(x).strip().upper() for x in (st.get("last_portfolio_tickers") or []) if x}
+        ta = sorted(live_set - prev_names)
+        tr = sorted(prev_names - live_set)
+        from tradingagents.portfolio_advisor.advisor_pm import optional_pm_cycle_on_portfolio_change
+
+        optional_pm_cycle_on_portfolio_change(
+            cfg,
+            trigger="portfolio_book_changed",
+            old_portfolio_text_hash=str(old_fp),
+            new_portfolio_text_hash=new_fp,
+            tickers_added=ta,
+            tickers_removed=tr,
+        )
 
     analysts = cfg.get("portfolio_advisor_deep_analysts") or ["news", "fundamentals", "market"]
     if not isinstance(analysts, list):
@@ -73,6 +112,23 @@ def run_full_portfolio_bootstrap(
 
     cap = max_positions if max_positions is not None and max_positions > 0 else len(live_list)
     todo: List[str] = live_list[:cap]
+    rd = Path(str(cfg.get("results_dir", "."))).expanduser()
+    if resume:
+        n0 = len(todo)
+        todo = [t for t in todo if not has_clerk_report_for_trade_date(rd, t, td)]
+        skipped = n0 - len(todo)
+        if skipped:
+            logger.info(
+                "bootstrap resume: skipping %d ticker(s) with existing %s clerk report",
+                skipped,
+                td,
+            )
+    if not todo:
+        raise RuntimeError(
+            f"No tickers left to bootstrap for {td} (resume skips names that already have "
+            f"{td}_clerk_triggered.md under {rd / 'clerk_deep'}). Omit resume to re-run all."
+        )
+
     results: Dict[str, Dict[str, Any]] = {}
 
     for i, tid in enumerate(todo):
@@ -107,18 +163,32 @@ def run_full_portfolio_bootstrap(
                 "excerpt": "",
             }
 
+    rating_counts = Counter(
+        v.get("rating", "unknown") for v in results.values() if v.get("status") == "ok"
+    )
+    ok_n = sum(1 for v in results.values() if v.get("status") == "ok")
+    err_n = len(results) - ok_n
+
     st["last_portfolio_text_hash"] = new_fp
     st["last_bootstrap_iso"] = datetime.now(timezone.utc).isoformat()
+    st["last_bootstrap_summary"] = {
+        "trade_date": td,
+        "tickers": [str(x).strip().upper() for x in todo],
+        "ok": ok_n,
+        "errors": err_n,
+        "ratings": {str(k): int(v) for k, v in rating_counts.items()},
+    }
     state.save_state(cfg, st)
 
     summary_lines: List[str] = [
         f"Portfolio bootstrap finished: {len(todo)} ticker(s) on {td}.",
         "",
+        "Scheduled advisor jobs (separate from this bootstrap) run when you execute "
+        "`python -m cli.main advisor portfolio run-due` on a timer (cron). "
+        "Increase `portfolio_advisor_run_due_max` in config if each invocation should drain more queue.",
+        "",
         "--- Rating distribution ---",
     ]
-    rating_counts = Counter(
-        v.get("rating", "unknown") for v in results.values() if v.get("status") == "ok"
-    )
     if rating_counts:
         for r, count in sorted(rating_counts.items()):
             summary_lines.append(f"  {r}: {count}")
@@ -138,6 +208,23 @@ def run_full_portfolio_bootstrap(
         else:
             summary_lines.append(f"{ticker}: ERROR, {v.get('status', '')}")
         summary_lines.append("")
+
+    append_event(
+        cfg,
+        {
+            "ticker": "*",
+            "event_type": "portfolio_bootstrap_complete",
+            "key_data": {
+                "trade_date": td,
+                "tickers": list(todo),
+                "ok": ok_n,
+                "errors": err_n,
+            },
+            "outcome": None,
+        },
+    )
+
+    _optional_pm_cycle_after_bootstrap(cfg)
 
     messaging.send_advisor_message(
         cfg,

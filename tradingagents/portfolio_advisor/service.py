@@ -388,6 +388,7 @@ def run_bootstrap(
     delay_seconds: float = 45.0,
     max_positions: int | None = None,
     trade_date: str | None = None,
+    resume: bool = False,
 ) -> dict:
     """Explicit full-graph pass for all (or capped) live eToro holdings."""
     from tradingagents.portfolio_advisor.bootstrap import run_full_portfolio_bootstrap
@@ -397,6 +398,7 @@ def run_bootstrap(
         trade_date=trade_date,
         delay_seconds=delay_seconds,
         max_positions=max_positions,
+        resume=resume,
     )
 
 
@@ -428,6 +430,26 @@ def _digest_preview(digest: Any) -> str:
     return f"{s[:16]}…"
 
 
+def _bootstrap_summary_one_line(summary: Any) -> str:
+    if not isinstance(summary, dict) or not summary:
+        return "(none)"
+    td = str(summary.get("trade_date") or "").strip() or "?"
+    tickers = summary.get("tickers") or []
+    n = len(tickers) if isinstance(tickers, list) else 0
+    ok = summary.get("ok")
+    err = int(summary.get("errors") or 0)
+    bits: List[str] = [f"as-of {td}", f"{n} name(s)"]
+    if ok is not None:
+        bits.append(f"{int(ok)} OK")
+    if err:
+        bits.append(f"{int(err)} failed")
+    ratings = summary.get("ratings") or {}
+    if isinstance(ratings, dict) and ratings:
+        rbits = [f"{k}:{v}" for k, v in sorted(ratings.items(), key=lambda kv: str(kv[0]))]
+        bits.append("ratings " + ",".join(rbits))
+    return " | ".join(bits)
+
+
 def status_text(cfg: Dict[str, Any]) -> str:
     st = state.load_state(cfg)
     lines = [
@@ -438,6 +460,9 @@ def status_text(cfg: Dict[str, Any]) -> str:
         f"last_replan_skip_iso: {st.get('last_replan_skip_iso')}",
         f"last_catalyst_digest: {_digest_preview(st.get('last_catalyst_digest'))}",
         f"last_bootstrap_iso: {st.get('last_bootstrap_iso')}",
+        f"last_bootstrap_summary: {_bootstrap_summary_one_line(st.get('last_bootstrap_summary'))}",
+        f"last_pm_cycle_iso: {st.get('last_pm_cycle_iso')}",
+        f"last_pm_executive_prefix: {(st.get('last_pm_executive_prefix') or '(none)')[:200]}",
         f"last_weekly_check_iso: {st.get('last_weekly_check_iso')}",
         f"last_weekly_scan_iso: {st.get('last_weekly_scan_iso')}",
         f"last_portfolio_tickers: {', '.join(st.get('last_portfolio_tickers') or [])}",

@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage
 from tradingagents.dataflows.config import set_config
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.portfolio_advisor import etoro_scan, messaging, outcome_sync
+from tradingagents.portfolio_advisor.prompt_limits import cfg_int
 
 logger = logging.getLogger(__name__)
 
@@ -62,13 +63,14 @@ def run_post_earnings_verdict(cfg: Dict[str, Any], ticker: str) -> str:
         px_note = f"Last close: unavailable ({e})\n"
 
     today = date.today().isoformat()
+    pcap = cfg_int(cfg, "portfolio_advisor_post_verdict_portfolio_chars", 5500, 2000, 30000)
     prompt = f"""You are writing a post-earnings thesis verdict for one open position. Advisory only. No trade orders.
 
 Ticker: {sym}
 As-of date: {today}
 
 Live portfolio excerpt (trimmed):
-{portfolio_text[:6000]}
+{portfolio_text[:pcap]}
 
 {catalyst_line}
 

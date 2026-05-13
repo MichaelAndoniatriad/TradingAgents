@@ -41,6 +41,24 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_BOOTSTRAP_ON_INIT": "portfolio_advisor_bootstrap_on_init",
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_BOOTSTRAP_DELAY": "portfolio_advisor_bootstrap_delay_seconds",
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_BOOTSTRAP_MAX_POSITIONS": "portfolio_advisor_bootstrap_max_positions",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_INJECT_PRIOR_CLERK": "portfolio_advisor_inject_prior_clerk_report",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PRIOR_CLERK_MAX_CHARS": "portfolio_advisor_prior_clerk_report_max_chars",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_MODEL": "portfolio_advisor_pm_model",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_LOG_PATH": "portfolio_advisor_pm_log_path",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_AFTER_BOOTSTRAP": "portfolio_advisor_pm_cycle_after_bootstrap",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_ENABLED": "portfolio_advisor_pm_enabled",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_AFTER_EACH_LANGGRAPH": "portfolio_advisor_pm_after_each_langgraph",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_APPLY_ACTIONS": "portfolio_advisor_pm_apply_actions",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_REPLAN_IGNORE_WEEKDAY": "portfolio_advisor_pm_replan_ignore_weekday",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_ON_PORTFOLIO_CHANGE": "portfolio_advisor_pm_cycle_on_portfolio_change",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_UNIFIED_MEMORY": "portfolio_advisor_pm_unified_memory",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_TRADING_MEMORY_PROMPT_CHARS": "portfolio_advisor_pm_trading_memory_prompt_chars",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_SNAPSHOT_CHARS": "portfolio_advisor_pm_portfolio_snapshot_chars",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_COMPACT_JSON": "portfolio_advisor_pm_compact_prompt_json",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PLANNER_PORTFOLIO_CHARS": "portfolio_advisor_planner_portfolio_chars",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PLANNER_CATALYST_CHARS": "portfolio_advisor_planner_catalyst_chars",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_POST_VERDICT_PORTFOLIO_CHARS": "portfolio_advisor_post_verdict_portfolio_chars",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_WEEKLY_LLM_DIGEST_CHARS": "portfolio_advisor_weekly_llm_digest_chars",
     "TRADINGAGENTS_ANALYSIS_EMAIL_TO": "analysis_email_to",
     "TRADINGAGENTS_ANALYSIS_EMAIL_FROM": "analysis_email_from",
     "TRADINGAGENTS_SMTP_HOST": "smtp_host",
@@ -94,6 +112,52 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "memory_context_max_cross_ticker": 3,
     # Recent JSONL lines per ticker appended to ``past_context`` for the graph PM.
     "memory_event_log_prompt_days": 30,
+    # Latest ``clerk_deep/<TICKER>/*_clerk_triggered.md`` prepended to full-graph ``past_context``.
+    "portfolio_advisor_inject_prior_clerk_report": True,
+    "portfolio_advisor_prior_clerk_report_max_chars": 16000,
+    # Advisor-level PM council (separate from LangGraph's Portfolio Manager node).
+    "portfolio_advisor_pm_model": None,
+    "portfolio_advisor_pm_log_path": None,
+    # Master switch for advisor PM (set False only to pause all PM automation, e.g. tests or cost cap).
+    "portfolio_advisor_pm_enabled": True,
+    # After each autonomous full-graph deep run (bootstrap, run-due full_graph, clerk queues), run advisor PM.
+    "portfolio_advisor_pm_after_each_langgraph": True,
+    # When True, run one advisor PM cycle immediately after portfolio bootstrap completes.
+    "portfolio_advisor_pm_cycle_after_bootstrap": True,
+    # When True, PM structured flags may trigger replan and/or append extra pending jobs.
+    "portfolio_advisor_pm_apply_actions": True,
+    # When PM calls replan, ignore the planner weekday gate by default so the request always runs.
+    "portfolio_advisor_pm_replan_ignore_weekday": True,
+    # When True, run an advisor PM cycle when the weekly check or bootstrap detects a book/fingerprint change.
+    "portfolio_advisor_pm_cycle_on_portfolio_change": True,
+    # When True, advisor PM markdown appends to memory_log_path (same file as LangGraph trading_memory.md),
+    # in delimiter-separated blocks ignored by TradingMemoryLog.parse; PM prompt includes a tail of that file.
+    "portfolio_advisor_pm_unified_memory": True,
+    # Max characters of trading_memory tail injected into the advisor PM prompt (unified mode only).
+    "portfolio_advisor_pm_trading_memory_prompt_chars": 6000,
+    # PM prompt size limits (lower = fewer tokens; raise if the model misses context).
+    "portfolio_advisor_pm_portfolio_snapshot_chars": 7000,
+    "portfolio_advisor_pm_bootstrap_summary_chars": 4000,
+    "portfolio_advisor_pm_pending_jobs_cap": 12,
+    "portfolio_advisor_pm_prior_cycles": 2,
+    "portfolio_advisor_pm_prior_executive_chars": 450,
+    "portfolio_advisor_pm_prior_memory_note_chars": 700,
+    "portfolio_advisor_pm_prior_context_total_chars": 2600,
+    "portfolio_advisor_pm_compact_prompt_json": True,
+    "portfolio_advisor_pm_extra_context_chars": 3200,
+    # Planner / replan LLM: portfolio export + catalyst digest size (characters).
+    "portfolio_advisor_planner_portfolio_chars": 10000,
+    "portfolio_advisor_planner_catalyst_chars": 7000,
+    # Post-earnings verdict CLI: portfolio excerpt in the reasoning prompt.
+    "portfolio_advisor_post_verdict_portfolio_chars": 5500,
+    # Optional weekly LLM digest (when ``portfolio_advisor_weekly_llm`` is True).
+    "portfolio_advisor_weekly_llm_digest_chars": 5600,
+    # Memory review: last N events as compact JSON in the reasoning prompt.
+    "portfolio_advisor_memory_review_sample_events": 36,
+    "portfolio_advisor_memory_review_json_chars": 11000,
+    # Single-model advisor jobs: memory + JSONL tail injected into the reasoning prompt.
+    "portfolio_advisor_single_model_memory_chars": 6800,
+    "portfolio_advisor_single_model_events_chars": 4800,
     # After a pending decision is resolved with returns, the quick LLM may append
     # short rules to learned_rules.md (default: sibling of trading_memory.md).
     "learned_rules_enabled": True,

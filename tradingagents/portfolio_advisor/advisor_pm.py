@@ -1,0 +1,531 @@
+"""Advisor-level portfolio manager (PM): one structured LLM pass per cycle, logged to disk."""
+
+from __future__ import annotations
+
+import json
+import logging
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from langchain_core.messages import HumanMessage
+
+from tradingagents.agents.utils.event_log import append_event
+from tradingagents.agents.utils.memory import TradingMemoryLog
+from tradingagents.agents.utils.structured import bind_structured
+from tradingagents.dataflows.config import set_config
+from tradingagents.llm_clients import create_llm_client
+from tradingagents.portfolio_advisor import etoro_scan, state
+from tradingagents.portfolio_advisor.models import AdvisorPMCycleResult
+from tradingagents.portfolio_advisor.prompt_limits import cfg_int as _pm_int
+
+logger = logging.getLogger(__name__)
+
+
+def pm_log_path(cfg: Dict[str, Any]) -> Path:
+    raw = cfg.get("portfolio_advisor_pm_log_path")
+    if isinstance(raw, str) and raw.strip():
+        return Path(raw).expanduser()
+    return state.advisor_dir(cfg) / "pm_council.jsonl"
+
+
+_PM_ADVISOR_SENTINEL = "<!-- TRADINGAGENTS_PM_ADVISOR_LOG -->"
+
+
+def _pm_unified_memory(cfg: Dict[str, Any]) -> bool:
+    return bool(cfg.get("portfolio_advisor_pm_unified_memory", True))
+
+
+def pm_memory_path(cfg: Dict[str, Any]) -> Path:
+    """Markdown trail for PM cycles: unified ``memory_log_path`` or advisor-local ``pm_memory.md``."""
+    if _pm_unified_memory(cfg):
+        raw = cfg.get("memory_log_path")
+        if isinstance(raw, str) and raw.strip():
+            p = Path(raw).expanduser()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            return p
+        logger.warning(
+            "portfolio_advisor_pm_unified_memory is on but memory_log_path is unset; "
+            "using advisor_dir/pm_memory.md"
+        )
+    return state.advisor_dir(cfg) / "pm_memory.md"
+
+
+def _trading_memory_tail_for_pm(cfg: Dict[str, Any]) -> str:
+    """Recent tail of LangGraph trading memory for PM prompt (unified mode only)."""
+    if not _pm_unified_memory(cfg):
+        return ""
+    raw = cfg.get("memory_log_path")
+    if not (isinstance(raw, str) and raw.strip()):
+        return "(memory_log_path not set.)"
+    try:
+        mx = int(cfg.get("portfolio_advisor_pm_trading_memory_prompt_chars") or 6000)
+    except (TypeError, ValueError):
+        mx = 6000
+    mx = max(400, min(mx, 50000))
+    path = Path(raw).expanduser()
+    if not path.is_file():
+        return "(trading memory file not created yet.)"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        return f"(could not read trading memory file: {e})"
+    tail = text[-mx:] if len(text) > mx else text
+    s = tail.strip()
+    return s if s else "(empty)"
+
+
+def _trading_memory_prompt_block(cfg: Dict[str, Any]) -> str:
+    """Omit the whole section when unified memory has nothing substantive (saves prompt tokens)."""
+    if not _pm_unified_memory(cfg):
+        return ""
+    tail = _trading_memory_tail_for_pm(cfg)
+    if tail in (
+        "(memory_log_path not set.)",
+        "(trading memory file not created yet.)",
+        "(empty)",
+    ) or tail.startswith("(could not read trading memory file"):
+        return ""
+    return (
+        "LangGraph trading memory log (recent tail; same file as PM markdown when unified):\n"
+        f"{tail}\n\n"
+    )
+
+
+def _pm_model(cfg: Dict[str, Any]) -> str:
+    raw = cfg.get("portfolio_advisor_pm_model")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return (cfg.get("portfolio_advisor_reasoning_model") or "deepseek/deepseek-r1").strip()
+
+
+def _pm_provider(cfg: Dict[str, Any], model: str) -> str:
+    if "/" in model:
+        return "openrouter"
+    return (cfg.get("llm_provider") or "openrouter").lower()
+
+
+def _provider_kwargs(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {}
+    prov = (cfg.get("llm_provider") or "openai").lower()
+    if prov == "google" and cfg.get("google_thinking_level"):
+        kwargs["thinking_level"] = cfg["google_thinking_level"]
+    if prov == "openai" and cfg.get("openai_reasoning_effort"):
+        kwargs["reasoning_effort"] = cfg["openai_reasoning_effort"]
+    if prov == "anthropic" and cfg.get("anthropic_effort"):
+        kwargs["effort"] = cfg["anthropic_effort"]
+    return kwargs
+
+
+def _pm_json_for_prompt(cfg: Dict[str, Any], obj: Any) -> str:
+    if bool(cfg.get("portfolio_advisor_pm_compact_prompt_json", True)):
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(obj, indent=2, ensure_ascii=False)
+
+
+def load_recent_pm_cycles(cfg: Dict[str, Any], *, limit: int = 30) -> List[Dict[str, Any]]:
+    """Newest-first parsed rows from the PM JSONL log."""
+    path = pm_log_path(cfg)
+    if not path.is_file():
+        return []
+    out: List[Dict[str, Any]] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    for line in text.splitlines()[-8000:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    out.reverse()
+    if limit > 0:
+        out = out[:limit]
+    return out
+
+
+def _append_pm_jsonl(cfg: Dict[str, Any], row: Dict[str, Any]) -> None:
+    path = pm_log_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(row, ensure_ascii=False) + "\n"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line)
+
+
+def _append_pm_memory_md(
+    cfg: Dict[str, Any],
+    *,
+    trigger: str,
+    result: AdvisorPMCycleResult,
+    actions_taken: Optional[Dict[str, Any]] = None,
+) -> None:
+    path = pm_memory_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    lines = [
+        f"{_PM_ADVISOR_SENTINEL}\n",
+        f"\n## PM cycle — {ts} — trigger `{trigger}`\n",
+        "### Executive summary\n",
+        (result.executive_summary or "").strip() + "\n",
+        "### Stances\n",
+    ]
+    for s in result.stances:
+        lines.append(f"- **{s.ticker}** — _{s.stance}_ — {s.rationale}\n")
+    if result.forward_tasks:
+        lines.append("\n### Forward tasks\n")
+        for t in result.forward_tasks:
+            lines.append(f"- {t}\n")
+    if (result.memory_note or "").strip():
+        lines.extend(["\n### Memory note (for next cycle)\n", result.memory_note.strip() + "\n"])
+    if actions_taken and actions_taken.get("apply_enabled", True):
+        lines.append("\n### Actions taken (automation)\n")
+        if actions_taken.get("replan_outcome") is not None:
+            lines.append(f"- Replan: `{actions_taken.get('replan_outcome')}`\n")
+        if actions_taken.get("replan_error"):
+            lines.append(f"- Replan error: {actions_taken.get('replan_error')}\n")
+        ja = int(actions_taken.get("jobs_appended") or 0)
+        if ja:
+            lines.append(f"- Extra jobs appended: {ja}\n")
+        if actions_taken.get("jobs_skipped"):
+            lines.append(f"- Skipped tickers (not in book): {', '.join(actions_taken['jobs_skipped'])}\n")
+    block = "".join(lines)
+    if _pm_unified_memory(cfg) and isinstance(cfg.get("memory_log_path"), str) and str(cfg["memory_log_path"]).strip():
+        block = block + TradingMemoryLog._SEPARATOR
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(block)
+
+
+def _prior_pm_context(cfg: Dict[str, Any]) -> str:
+    n = _pm_int(cfg, "portfolio_advisor_pm_prior_cycles", 2, 0, 8)
+    if n <= 0:
+        return ""
+    prev = load_recent_pm_cycles(cfg, limit=n)
+    if not prev:
+        return ""
+    ex_cap = _pm_int(cfg, "portfolio_advisor_pm_prior_executive_chars", 450, 80, 4000)
+    mem_cap = _pm_int(cfg, "portfolio_advisor_pm_prior_memory_note_chars", 700, 0, 8000)
+    total_cap = _pm_int(cfg, "portfolio_advisor_pm_prior_context_total_chars", 2600, 200, 20000)
+    chunks = []
+    for row in reversed(prev):
+        r = row.get("result") or {}
+        if not isinstance(r, dict):
+            continue
+        mem = str(r.get("memory_note") or "").strip()
+        if mem_cap > 0 and len(mem) > mem_cap:
+            mem = mem[:mem_cap] + "…"
+        ex = str(r.get("executive_summary") or "").strip()[:ex_cap]
+        chunks.append(f"Previous summary:\n{ex}\nPrevious memory note:\n{mem or '(none)'}\n")
+    joined = "\n---\n".join(chunks)
+    return joined[:total_cap]
+
+
+def _content_from_llm_message(msg: Any) -> str:
+    content = getattr(msg, "content", str(msg))
+    if isinstance(content, list):
+        parts: List[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+        content = "\n".join(parts) if parts else str(content)
+    return str(content).strip()
+
+
+def _coerce_pm_result_from_text(text: str) -> AdvisorPMCycleResult:
+    raw = text.strip()
+    try:
+        return AdvisorPMCycleResult.model_validate_json(raw)
+    except Exception:
+        return AdvisorPMCycleResult(
+            executive_summary=raw[:8000] if raw else "(empty LLM response)",
+            stances=[],
+            forward_tasks=[],
+            memory_note="",
+            request_replan=False,
+            replan_rationale="",
+            append_jobs=[],
+        )
+
+
+def apply_pm_cycle_followups(cfg: Dict[str, Any], result: AdvisorPMCycleResult) -> Dict[str, Any]:
+    """Execute PM-structured replan / extra job requests (Phase 3). Never raises."""
+    actions: Dict[str, Any] = {
+        "apply_enabled": bool(cfg.get("portfolio_advisor_pm_apply_actions", True)),
+    }
+    if not actions["apply_enabled"]:
+        return actions
+
+    actions["replan_outcome"] = None
+    actions["replan_error"] = None
+    actions["jobs_appended"] = 0
+    actions["jobs_skipped"] = []
+
+    if result.request_replan:
+        try:
+            from tradingagents.portfolio_advisor.service import run_replan
+
+            token = run_replan(
+                cfg,
+                ignore_weekday=bool(cfg.get("portfolio_advisor_pm_replan_ignore_weekday", True)),
+            )
+            actions["replan_outcome"] = token
+        except Exception as e:
+            logger.exception("PM-requested replan failed")
+            actions["replan_error"] = str(e)
+
+    specs = list(result.append_jobs or [])[:5]
+    if not specs:
+        return actions
+
+    try:
+        _payload, _pt, tickers, _rows = etoro_scan.fetch_portfolio_rows()
+        live = etoro_scan.current_ticker_set(tickers)
+    except Exception as e:
+        logger.warning("PM append_jobs: portfolio fetch failed: %s", e)
+        actions["jobs_fetch_error"] = str(e)
+        return actions
+
+    st = state.load_state(cfg)
+    now = datetime.now(timezone.utc)
+    new_rows: List[Dict[str, Any]] = []
+    for i, job in enumerate(specs):
+        tid = str(job.ticker or "").strip().upper()
+        if not tid or tid not in live:
+            actions["jobs_skipped"].append(tid or "?")
+            continue
+        when = now + timedelta(minutes=8 + i * 9)
+        new_rows.append(
+            {
+                "id": uuid.uuid4().hex[:20],
+                "ticker": tid,
+                "scheduled_at": when.isoformat(),
+                "kind": "deep_research",
+                "reason": (job.rationale or "PM-requested follow-up").strip()[:500],
+                "status": "pending",
+                "created_at": now.isoformat(),
+                "execution_tier": str(job.execution_tier or "single_model").strip(),
+                "job_type": str(job.job_type or "thesis_check").strip(),
+                "flags": ["PM_APPEND"],
+            }
+        )
+    if new_rows:
+        state.append_jobs(st, new_rows)
+        state.save_state(cfg, st)
+        actions["jobs_appended"] = len(new_rows)
+    return actions
+
+
+def run_pm_cycle(
+    cfg: Dict[str, Any],
+    *,
+    trigger: str = "manual",
+    extra_context: Optional[str] = None,
+) -> AdvisorPMCycleResult:
+    """Run one PM council pass: portfolio snapshot + state → structured plan → logs."""
+    set_config(cfg)
+    trigger_s = (trigger or "manual").strip()[:80] or "manual"
+
+    _payload, portfolio_text, tickers, _rows = etoro_scan.fetch_portfolio_rows()
+    if not tickers:
+        raise RuntimeError("No tickers in eToro portfolio export.")
+
+    st = state.load_state(cfg)
+    summ = st.get("last_bootstrap_summary")
+    summ_txt = ""
+    summ_max = _pm_int(cfg, "portfolio_advisor_pm_bootstrap_summary_chars", 4000, 0, 20000)
+    if isinstance(summ, dict) and summ and summ_max > 0:
+        summ_txt = _pm_json_for_prompt(cfg, summ)[:summ_max]
+
+    pend = [j for j in (st.get("jobs") or []) if isinstance(j, dict) and j.get("status") == "pending"]
+    job_cap = _pm_int(cfg, "portfolio_advisor_pm_pending_jobs_cap", 12, 0, 100)
+    pend_preview = _pm_json_for_prompt(
+        cfg,
+        [
+            {
+                "ticker": j.get("ticker"),
+                "scheduled_at": j.get("scheduled_at"),
+                "tier": j.get("execution_tier"),
+                "type": j.get("job_type"),
+            }
+            for j in pend[:job_cap]
+        ],
+    )
+
+    model = _pm_model(cfg)
+    provider = _pm_provider(cfg, model)
+    base = cfg.get("corporate_openrouter_base_url") or cfg.get("backend_url")
+
+    snap_max = _pm_int(cfg, "portfolio_advisor_pm_portfolio_snapshot_chars", 7000, 1000, 50000)
+    portfolio_excerpt = (portfolio_text or "")[:snap_max]
+    extra_cap = _pm_int(cfg, "portfolio_advisor_pm_extra_context_chars", 3200, 0, 20000)
+    extra_excerpt = (extra_context or "").strip()[:extra_cap] if extra_cap > 0 else ""
+
+    prior_txt = _prior_pm_context(cfg)
+    prior_block = f"Prior PM context (most recent cycles):\n{prior_txt}\n\n" if prior_txt else ""
+    tm_block = _trading_memory_prompt_block(cfg)
+
+    prompt = f"""You are the portfolio manager for a research stack. Advisory only: no trade orders, no claims that trades executed.
+
+Authority: the human controls the real portfolio and every execution decision. LangGraph and lighter single-model passes are research tools — treat their outputs as inputs, not as orders or fills.
+
+Execution tiers (for append_jobs only): "full_graph" runs the full multi-agent pipeline on one ticker; "single_model" is a faster desk-style pass (thesis_check, weekly_summary, post_earnings, routine_monitoring).
+
+Trigger for this cycle: {trigger_s}
+
+Portfolio snapshot (truncated):
+{portfolio_excerpt}
+
+Live tickers (normalized): {", ".join(sorted(etoro_scan.current_ticker_set(tickers)))}
+
+Pending advisor jobs preview (JSON):
+{pend_preview}
+
+Last bootstrap summary (JSON, may be empty):
+{summ_txt or "(none)"}
+
+{prior_block}{tm_block}Extra notes from caller (may be empty):
+{extra_excerpt or "(none)"}
+
+Structured output fields (use defaults when unsure):
+- request_replan: set true only when the pending job queue should be fully rebuilt via the planner LLM
+  (cancels current pending jobs). Set replan_rationale when true.
+- append_jobs: up to five extra pending jobs to queue without relying on the planner (use live tickers only).
+  Each entry: ticker, execution_tier single_model or full_graph, job_type thesis_check|weekly_summary|post_earnings|routine_monitoring, rationale.
+  If you set request_replan true, you may still append_jobs; they are added after the replan finishes.
+
+Deliver structured output only. Stances must use tickers you see above. forward_tasks should be concrete
+(research X, schedule replan, verify Y thesis, respond to risk flag, etc.). memory_note is what you want your next self to read first.
+"""
+    client = create_llm_client(
+        provider=provider,
+        model=model,
+        base_url=base,
+        **_provider_kwargs(cfg),
+    )
+    llm = client.get_llm()
+    structured = bind_structured(llm, AdvisorPMCycleResult, "AdvisorPMCycle")
+    if structured is not None:
+        try:
+            out = structured.invoke([HumanMessage(content=prompt)])
+            if isinstance(out, AdvisorPMCycleResult):
+                result = out
+            else:
+                result = _coerce_pm_result_from_text(_content_from_llm_message(out))
+        except Exception as e:
+            logger.warning("PM structured cycle failed: %s", e)
+            raw = llm.invoke([HumanMessage(content=prompt)])
+            result = _coerce_pm_result_from_text(_content_from_llm_message(raw))
+    else:
+        raw = llm.invoke([HumanMessage(content=prompt)])
+        result = _coerce_pm_result_from_text(_content_from_llm_message(raw))
+
+    actions_taken = apply_pm_cycle_followups(cfg, result)
+
+    ts = datetime.now(timezone.utc).isoformat()
+    row = {
+        "timestamp": ts,
+        "trigger": trigger_s,
+        "model": model,
+        "result": result.model_dump(),
+        "actions_taken": actions_taken,
+    }
+    _append_pm_jsonl(cfg, row)
+    _append_pm_memory_md(cfg, trigger=trigger_s, result=result, actions_taken=actions_taken)
+
+    st2 = state.load_state(cfg)
+    st2["last_pm_cycle_iso"] = ts
+    ex = (result.executive_summary or "").strip()
+    st2["last_pm_executive_prefix"] = ex[:500] + ("…" if len(ex) > 500 else "")
+    state.save_state(cfg, st2)
+
+    excerpt = ex[:900] if ex else ""
+    append_event(
+        cfg,
+        {
+            "ticker": "*",
+            "event_type": "advisor_pm_cycle",
+            "key_data": {
+                "trigger": trigger_s,
+                "model": model,
+                "stance_tickers": [s.ticker for s in result.stances[:24]],
+                "forward_tasks_n": len(result.forward_tasks),
+                "excerpt": excerpt,
+                "request_replan": bool(result.request_replan),
+                "replan_outcome": actions_taken.get("replan_outcome"),
+                "replan_error": actions_taken.get("replan_error"),
+                "jobs_appended": int(actions_taken.get("jobs_appended") or 0),
+            },
+            "outcome": None,
+        },
+    )
+    return result
+
+
+def run_pm_after_full_graph_if_enabled(
+    cfg: Dict[str, Any],
+    *,
+    ticker: str,
+    trade_date: str,
+    final_state: Dict[str, Any],
+) -> None:
+    """Run advisor PM immediately after a full LangGraph deep run (best-effort; never raises)."""
+    if not bool(cfg.get("portfolio_advisor_pm_enabled", True)):
+        return
+    if not bool(cfg.get("portfolio_advisor_pm_after_each_langgraph", True)):
+        return
+    sym = str(ticker or "").strip().upper()
+    td = str(trade_date or "").strip()
+    dec = str((final_state or {}).get("final_trade_decision") or "").strip()
+    extra = (
+        f"A full-graph (LangGraph) run just finished for {sym} (trade_date={td}).\n"
+        "The human owns the portfolio; use this decision as one input and set portfolio-level next steps.\n\n"
+        f"Final decision text (truncated):\n{dec[:2800]}"
+    )
+    try:
+        run_pm_cycle(cfg, trigger="after_langgraph", extra_context=extra)
+    except Exception:
+        logger.exception("Advisor PM after LangGraph failed for %s", sym)
+
+
+def optional_pm_cycle_on_portfolio_change(
+    cfg: Dict[str, Any],
+    *,
+    trigger: str,
+    old_portfolio_text_hash: Optional[str],
+    new_portfolio_text_hash: str,
+    tickers_added: Optional[List[str]] = None,
+    tickers_removed: Optional[List[str]] = None,
+) -> None:
+    """Run a PM cycle when the live book or snapshot fingerprint changed (Phase 4). Best-effort."""
+    if not bool(cfg.get("portfolio_advisor_pm_enabled", True)):
+        return
+    if not bool(cfg.get("portfolio_advisor_pm_cycle_on_portfolio_change", True)):
+        return
+    ta = [str(x).strip().upper() for x in (tickers_added or []) if str(x).strip()]
+    tr = [str(x).strip().upper() for x in (tickers_removed or []) if str(x).strip()]
+    h_changed = bool(
+        old_portfolio_text_hash
+        and new_portfolio_text_hash
+        and str(old_portfolio_text_hash) != str(new_portfolio_text_hash)
+    )
+    if not h_changed and not ta and not tr:
+        return
+    lines: List[str] = []
+    if ta or tr:
+        lines.append(
+            f"Tickers added: {', '.join(ta) if ta else '(none)'}; "
+            f"removed: {', '.join(tr) if tr else '(none)'}"
+        )
+    if h_changed:
+        lines.append(
+            "Portfolio snapshot fingerprint changed: "
+            f"{str(old_portfolio_text_hash)[:16]}… → {str(new_portfolio_text_hash)[:16]}…"
+        )
+    extra = "\n".join(lines) if lines else "Portfolio change signal (no ticker list diff captured)."
+    try:
+        run_pm_cycle(cfg, trigger=trigger, extra_context=extra)
+    except Exception:
+        logger.exception("PM cycle on portfolio change failed (trigger=%s)", trigger)

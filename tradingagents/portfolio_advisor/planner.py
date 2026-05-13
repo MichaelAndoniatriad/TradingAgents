@@ -10,6 +10,7 @@ from tradingagents.agents.utils.structured import bind_structured
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.portfolio_advisor import catalysts
 from tradingagents.portfolio_advisor.models import AdvisorPlanResult
+from tradingagents.portfolio_advisor.prompt_limits import cfg_int
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,8 @@ def build_advisor_plan(
     max_jobs = int(cfg.get("portfolio_advisor_max_jobs_per_plan") or 15)
     ramp_days = int(cfg.get("portfolio_advisor_earnings_ramp_days") or 7)
     ramp_block = catalysts.earnings_ramp_block_for_tickers(tickers, ramp_days)
+    pcap = cfg_int(cfg, "portfolio_advisor_planner_portfolio_chars", 10000, 4000, 50000)
+    ccap = cfg_int(cfg, "portfolio_advisor_planner_catalyst_chars", 7000, 2000, 50000)
     prompt = f"""You are an autonomous portfolio advisor (not a broker). {mode.upper()} scheduling scan.
 
 Now (UTC): {now}
@@ -70,13 +73,13 @@ Rules:
 - Leave flags as an empty list unless you add short freeform tags you want surfaced in metadata.
 
 Portfolio snapshot:
-{portfolio_text[:12000]}
+{portfolio_text[:pcap]}
 
 Earnings proximity (ramp window):
 {ramp_block}
 
 Catalyst hints (best-effort; verify in research):
-{catalyst_text[:8000]}
+{catalyst_text[:ccap]}
 """
     if structured is not None:
         try:

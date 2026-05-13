@@ -13,6 +13,7 @@ from tradingagents.agents.utils.event_log import load_events_for_review
 from tradingagents.dataflows.config import set_config
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.portfolio_advisor import messaging
+from tradingagents.portfolio_advisor.prompt_limits import cfg_int
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,9 @@ def run_memory_review(cfg: Dict[str, Any], *, lookback_days: int = 120) -> str:
         et = str(r.get("event_type") or "?")
         counts[et] = counts.get(et, 0) + 1
     hist = "\n".join(f"- {k}: {v}" for k, v in sorted(counts.items(), key=lambda x: -x[1]))
-    sample = json.dumps(rows[-40:], indent=2, ensure_ascii=False)[:12000]
+    n = cfg_int(cfg, "portfolio_advisor_memory_review_sample_events", 36, 10, 80)
+    jcap = cfg_int(cfg, "portfolio_advisor_memory_review_json_chars", 11000, 2000, 120000)
+    sample = json.dumps(rows[-n:], separators=(",", ":"), ensure_ascii=False)[:jcap]
 
     model = (cfg.get("portfolio_advisor_reasoning_model") or "deepseek/deepseek-r1").strip()
     provider = "openrouter" if "/" in model else (cfg.get("llm_provider") or "openrouter").lower()
@@ -52,7 +55,7 @@ Lookback: last {lookback_days} days.
 Event counts by type:
 {hist}
 
-Last 40 raw events (JSON):
+Last {n} raw events (compact JSON):
 {sample}
 
 Today (UTC): {today}
