@@ -17,17 +17,17 @@ def test_runtime_roundtrip_merge(tmp_path):
     uc.save_runtime_overlay(
         uc.build_overlay_from_scalars_and_routing(
             {"memory_context_lookback_days": 90},
-            {"news_analyst": {"model": "google/gemini-flash-1.5"}},
+            {"news_analyst": {"model": "google/gemini-2.0-flash-001"}},
             home=home,
         ),
         home=home,
     )
     cfg2 = uc.merged_app_config(home=home)
     assert cfg2["memory_context_lookback_days"] == 90
-    assert cfg2["agent_llm_routing"]["news_analyst"]["model"] == "google/gemini-flash-1.5"
+    assert cfg2["agent_llm_routing"]["news_analyst"]["model"] == "google/gemini-2.0-flash-001"
 
     eff = uc.effective_corporate_routing(cfg2)
-    assert eff["news_analyst"]["model"] == "google/gemini-flash-1.5"
+    assert eff["news_analyst"]["model"] == "google/gemini-2.0-flash-001"
     assert "market_analyst" in eff
 
 

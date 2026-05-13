@@ -232,7 +232,8 @@ def get_known_models() -> Dict[str, List[str]]:
 
 # Data layer — low complexity, high volume
 OR_DEEPSEEK_V4_FLASH = "deepseek/deepseek-v4-flash"
-OR_GEMINI_15_FLASH = "google/gemini-flash-1.5"  # 1M+ context for bulk news
+# OpenRouter retired ``google/gemini-flash-1.5``; use a current slug (1M ctx on OR).
+OR_GEMINI_BULK_NEWS = "google/gemini-2.0-flash-001"
 
 # Strategy layer
 OR_DEEPSEEK_R1 = "deepseek/deepseek-r1"
@@ -250,7 +251,7 @@ DEFAULT_CORPORATE_AGENT_ROUTING: Dict[str, Dict[str, Any]] = {
     "market_analyst": {"provider": "openrouter", "model": OR_DEEPSEEK_V4_FLASH},
     "sentiment_analyst": {"provider": "openrouter", "model": OR_DEEPSEEK_V4_FLASH},
     "fundamentals_analyst": {"provider": "openrouter", "model": OR_DEEPSEEK_V4_FLASH},
-    "news_analyst": {"provider": "openrouter", "model": OR_GEMINI_15_FLASH},
+    "news_analyst": {"provider": "openrouter", "model": OR_GEMINI_BULK_NEWS},
     "bull_researcher": {"provider": "openrouter", "model": OR_CLAUDE_SONNET},
     "bear_researcher": {"provider": "openrouter", "model": OR_CLAUDE_SONNET},
     "trader": {"provider": "openrouter", "model": OR_DEEPSEEK_R1},
