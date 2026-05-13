@@ -1,0 +1,49 @@
+# deploy/ntfy-listener.service — systemd USER unit for the ntfy two-way listener.
+#
+# Install (run as the user who owns the repo, e.g. ubuntu or your own account):
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp /path/to/trading-agents/deploy/ntfy-listener.service \
+#      ~/.config/systemd/user/ntfy-listener.service
+#
+#   # Edit WorkingDirectory / ExecStart below to match your actual install path.
+#   # If you use a virtualenv or uv, point ExecStart to its python binary.
+#
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now ntfy-listener.service
+#   systemctl --user status ntfy-listener.service
+#
+# To survive SSH logout (linger must be enabled once per user):
+#   sudo loginctl enable-linger $USER
+#
+# View live logs:
+#   journalctl --user -u ntfy-listener.service -f
+#   # or the script's own log:
+#   tail -f ~/.tradingagents/logs/ntfy_listener.log
+#
+# Environment variables (set in your .env file at WorkingDirectory/.env):
+#   NTFY_TOPIC          — required, e.g. trading-michael-alerts
+#   NTFY_BASE_URL       — optional, default https://ntfy.sh
+#   NTFY_POLL_INTERVAL  — optional, default 3 (seconds)
+
+[Unit]
+Description=TradingAgents ntfy two-way listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --- adjust these two paths to match your installation ---
+WorkingDirectory=/opt/tradingagents
+ExecStart=/opt/tradingagents/.venv/bin/python ntfy_listener.py
+# ---------------------------------------------------------
+Restart=always
+RestartSec=10
+# Keep stdout/stderr in the journal (journalctl --user -u ntfy-listener -f)
+StandardOutput=journal
+StandardError=journal
+# Ensure the .env in WorkingDirectory is readable
+EnvironmentFile=-%h/.tradingagents/.env.override
+
+[Install]
+WantedBy=default.target

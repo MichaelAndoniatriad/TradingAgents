@@ -16,15 +16,28 @@ def get_webhook_url() -> Optional[str]:
 
 
 def send_webhook(url: str, text: str, extra: Optional[dict[str, Any]] = None) -> bool:
-    """POST a message to a generic webhook (Slack-compatible ``text`` field).
+    """POST a message to a webhook.
 
+    Detects ntfy.sh URLs and sends plain text (which ntfy.sh displays cleanly).
+    All other URLs get Slack-compatible JSON (``{"text": "..."}``.
     Returns True on 2xx, False otherwise.
     """
-    payload: dict[str, Any] = {"text": text}
-    if extra:
-        payload.update(extra)
     try:
-        r = requests.post(url, json=payload, timeout=30)
+        if "ntfy.sh" in url:
+            # ntfy.sh wants plain text in the body, not JSON
+            title = (extra or {}).get("title", "TradingAgents")
+            r = requests.post(
+                url,
+                data=text.encode("utf-8"),
+                headers={"Title": str(title), "Priority": "default"},
+                timeout=30,
+            )
+        else:
+            payload: dict[str, Any] = {"text": text}
+            if extra:
+                payload.update(extra)
+            r = requests.post(url, json=payload, timeout=30)
+
         if 200 <= r.status_code < 300:
             return True
         logger.warning("Webhook returned %s: %s", r.status_code, r.text[:500])

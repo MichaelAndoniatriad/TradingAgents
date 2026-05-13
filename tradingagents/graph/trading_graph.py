@@ -86,6 +86,53 @@ class TradingAgentsGraph:
             self.llm_by_role = build_corporate_hierarchy_llms(self.config, self.callbacks)
             self.quick_thinking_llm = self.llm_by_role["reflection"]
             self.deep_thinking_llm = self.llm_by_role["research_manager"]
+        elif (
+            self.config.get("analyst_llm")
+            and self.config.get("debate_llm")
+            and self.config.get("execution_llm")
+        ):
+            # Tiered routing: three model tiers, all via the configured provider.
+            # Build one client per tier then fan out to per-role LLM instances.
+            analyst_client = create_llm_client(
+                provider=self.config["llm_provider"],
+                model=self.config["analyst_llm"],
+                base_url=self.config.get("backend_url"),
+                **llm_kwargs,
+            )
+            debate_client = create_llm_client(
+                provider=self.config["llm_provider"],
+                model=self.config["debate_llm"],
+                base_url=self.config.get("backend_url"),
+                **llm_kwargs,
+            )
+            execution_client = create_llm_client(
+                provider=self.config["llm_provider"],
+                model=self.config["execution_llm"],
+                base_url=self.config.get("backend_url"),
+                **llm_kwargs,
+            )
+            analyst_llm = analyst_client.get_llm()
+            debate_llm = debate_client.get_llm()
+            execution_llm = execution_client.get_llm()
+
+            _ANALYST_ROLES = ("market", "social", "news", "fundamentals")
+            _DEBATE_ROLES = (
+                "bull", "bear", "trader", "research_manager",
+                "risk_aggressive", "risk_neutral", "risk_conservative",
+            )
+            self.llm_by_role = {}
+            for role in _ANALYST_ROLES:
+                self.llm_by_role[role] = analyst_llm
+            for role in _DEBATE_ROLES:
+                self.llm_by_role[role] = debate_llm
+            self.llm_by_role["portfolio_manager"] = execution_llm
+            # reflection helper uses the debate-tier model (cheap but capable)
+            self.llm_by_role["reflection"] = debate_llm
+
+            # Keep quick/deep references consistent for helpers outside GraphSetup
+            # (Reflector, SignalProcessor, learned-rules).
+            self.quick_thinking_llm = analyst_llm
+            self.deep_thinking_llm = execution_llm
         else:
             self.llm_by_role = None
             deep_client = create_llm_client(

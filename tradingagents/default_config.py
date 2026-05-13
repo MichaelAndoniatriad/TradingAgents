@@ -18,6 +18,9 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_RISK_ROUNDS":      "max_risk_discuss_rounds",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
+    "TRADINGAGENTS_ANALYST_LLM":          "analyst_llm",
+    "TRADINGAGENTS_DEBATE_LLM":           "debate_llm",
+    "TRADINGAGENTS_EXECUTION_LLM":        "execution_llm",
     "TRADINGAGENTS_LEARNED_RULES_ENABLED": "learned_rules_enabled",
     "TRADINGAGENTS_LEARNED_RULES_PATH":   "learned_rules_path",
     "TRADINGAGENTS_ANALYSIS_WEBHOOK_URL": "analysis_webhook_url",
@@ -227,6 +230,17 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # the oldest resolved entries are pruned once this limit is exceeded.
     # Pending entries are never pruned. None disables rotation entirely.
     "memory_log_max_entries": None,
+    # Tiered model routing (used when corporate_hierarchy_enabled is False).
+    # When all three keys are set (non-None), each role group gets its own
+    # OpenRouter model instead of the coarse quick/deep split.
+    #   analyst_llm    -> market, social, news, fundamentals analysts (Tier 2)
+    #   debate_llm     -> bull, bear, trader, research_manager,
+    #                     risk_aggressive, risk_neutral, risk_conservative (Tier 3 debate)
+    #   execution_llm  -> portfolio_manager only (Tier 3 arbiter)
+    # Set any of them to None to fall back to the quick/deep pair below.
+    "analyst_llm": None,
+    "debate_llm": None,
+    "execution_llm": None,
     # LLM settings (legacy single-provider graph when corporate_hierarchy_enabled is False)
     "llm_provider": "openrouter",
     "deep_think_llm": "openai/gpt-4o",
