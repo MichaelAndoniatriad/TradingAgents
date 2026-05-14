@@ -24,11 +24,12 @@ def send_webhook(url: str, text: str, extra: Optional[dict[str, Any]] = None) ->
     """
     try:
         if "ntfy.sh" in url:
-            # ntfy.sh wants plain text in the body, not JSON
+            # ntfy.sh wants plain text; hard limit is 4096 bytes — truncate or it becomes a file attachment
             title = (extra or {}).get("title", "TradingAgents")
+            body = text[:4000] + ("\n\n[truncated — see dashboard for full text]" if len(text) > 4000 else "")
             r = requests.post(
                 url,
-                data=text.encode("utf-8"),
+                data=body.encode("utf-8"),
                 headers={"Title": str(title), "Priority": "default"},
                 timeout=30,
             )
