@@ -102,39 +102,30 @@ def _ntfy_publish(topic: str, message: str, title: str = "TradingAgents") -> Non
         log.error("Failed to publish ntfy reply: %s", exc)
 
 
-def _poll_messages(topic: str, since: str) -> tuple[list[dict], str]:
-    """Poll ntfy for new messages since the given message ID or timestamp.
+def _stream_messages(topic: str, since: str):
+    """Open a persistent streaming connection to ntfy and yield messages as they arrive.
 
-    Returns (messages, new_since) where new_since is the ID of the last
-    message seen (or the original since value if nothing new arrived).
+    Uses the streaming JSON endpoint (no poll=1) so ntfy pushes events to us.
+    One persistent connection instead of repeated polls — avoids 429 rate limits.
+    Yields (msg_dict, new_since) tuples. Raises on connection error so the
+    caller can reconnect with backoff.
     """
     url = f"{NTFY_BASE}/{topic}/json"
-    params = {"poll": "1", "since": since}
-    try:
-        resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+    params = {"since": since}
+    with requests.get(url, params=params, stream=True, timeout=None) as resp:
         resp.raise_for_status()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Poll failed: %s", exc)
-        return [], since
-
-    messages: list[dict] = []
-    new_since = since
-    for line in resp.text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(msg, dict):
-            continue
-        msg_id = msg.get("id", "")
-        # Update the cursor to the latest message we've seen
-        if msg_id:
-            new_since = msg_id
-        messages.append(msg)
-    return messages, new_since
+        for raw in resp.iter_lines():
+            if not raw:
+                continue
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(msg, dict):
+                continue
+            msg_id = msg.get("id", "")
+            new_since = msg_id if msg_id else since
+            yield msg, new_since
 
 # ---------------------------------------------------------------------------
 # Command handlers
@@ -396,25 +387,25 @@ def main() -> None:
         )
         sys.exit(1)
 
-    log.info("ntfy listener starting — topic=%s poll_interval=%ds", NTFY_TOPIC, POLL_INTERVAL)
+    log.info("ntfy listener starting (streaming mode) — topic=%s", NTFY_TOPIC)
     log.info("Logs: %s", LOG_FILE)
 
     # Seed 'since' with the current epoch so we only process messages
     # arriving *after* we start (avoids replaying historical commands).
     since = str(int(time.time()))
+    backoff = 5  # seconds before reconnect on error
 
     while True:
         try:
-            messages, since = _poll_messages(NTFY_TOPIC, since)
-            for msg in messages:
+            log.info("Connecting to ntfy stream (since=%s)…", since)
+            for msg, since in _stream_messages(NTFY_TOPIC, since):
+                backoff = 5  # reset on successful receive
                 msg_id = msg.get("id", "")
                 msg_event = msg.get("event", "message")
 
-                # Skip keepalive / open events
                 if msg_event != "message":
                     continue
 
-                # Skip messages we ourselves sent
                 if msg_id in _SENT_IDS:
                     continue
 
@@ -433,9 +424,9 @@ def main() -> None:
             log.info("Interrupted — shutting down.")
             break
         except Exception as exc:  # noqa: BLE001
-            log.exception("Unexpected error in main loop: %s", exc)
-
-        time.sleep(POLL_INTERVAL)
+            log.warning("Stream disconnected: %s — reconnecting in %ds", exc, backoff)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)  # cap at 60s
 
 
 if __name__ == "__main__":
