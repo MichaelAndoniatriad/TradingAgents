@@ -75,7 +75,7 @@ log = logging.getLogger("ntfy_listener")
 # ntfy helpers
 # ---------------------------------------------------------------------------
 
-def _ntfy_publish(topic: str, message: str, title: str = "TradingAgents") -> None:
+def _ntfy_publish(topic: str, message: str, title: str = "PM") -> None:
     """POST a reply back to the ntfy topic.  Swallows errors and logs them."""
     url = f"{NTFY_BASE}/{topic}"
     try:
@@ -284,9 +284,9 @@ def _cmd_ask(question: str, topic: str) -> str:
         f"    if approval:\n"
         f"        parts.append('')\n"
         f"        parts.append(approval)\n"
-        f"    post('\\n'.join(parts), title='PM Reply')\n"
+        f"    post('\\n'.join(parts), title='PM')\n"
         f"except Exception as exc:\n"
-        f"    post(f'PM error: {{exc}}', title='PM Error')\n"
+        f"    post(f'PM error: {{exc}}', title='PM')\n"
     )
     try:
         subprocess.Popen(
@@ -295,7 +295,7 @@ def _cmd_ask(question: str, topic: str) -> str:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        return f"Thinking... answer coming shortly."
+        return ""
     except Exception as exc:  # noqa: BLE001
         return f"Failed to launch PM subprocess: {exc}"
 
@@ -328,9 +328,9 @@ def _cmd_yes(topic: str) -> str:
         f"        post('No pending actions to approve.', title='PM')\n"
         f"    else:\n"
         f"        result = execute_pending_approval(cfg)\n"
-        f"        post(f'Approved. {{result}}', title='PM Approved')\n"
+        f"        post(f'Done. {{result}}', title='PM')\n"
         f"except Exception as exc:\n"
-        f"    post(f'Approval failed: {{exc}}', title='PM Error')\n"
+        f"    post(f'Error: {{exc}}', title='PM')\n"
     )
     try:
         subprocess.Popen(
