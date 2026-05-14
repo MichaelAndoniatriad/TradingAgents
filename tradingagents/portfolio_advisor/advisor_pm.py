@@ -337,6 +337,116 @@ def _coerce_pm_result_from_text(text: str) -> AdvisorPMCycleResult:
         )
 
 
+# ---------------------------------------------------------------------------
+# Pending approval — PM proposes actions, human confirms via ntfy YES/NO
+# ---------------------------------------------------------------------------
+
+def _pending_approval_path(cfg: Dict[str, Any]) -> Path:
+    return state.advisor_dir(cfg) / "pending_approval.json"
+
+
+def save_pending_approval(cfg: Dict[str, Any], result: AdvisorPMCycleResult) -> None:
+    """Save proposed PM actions to disk, waiting for human YES/NO."""
+    path = _pending_approval_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "request_replan": result.request_replan,
+        "replan_rationale": result.replan_rationale or "",
+        "append_jobs": [j.model_dump() for j in (result.append_jobs or [])],
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def load_pending_approval(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    path = _pending_approval_path(cfg)
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def discard_pending_approval(cfg: Dict[str, Any]) -> None:
+    path = _pending_approval_path(cfg)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def format_approval_prompt(result: AdvisorPMCycleResult) -> str:
+    """Build a short phone-readable summary of what the PM wants to do."""
+    lines: List[str] = []
+    if result.request_replan:
+        reason = (result.replan_rationale or "priorities shifted").strip()[:120]
+        lines.append(f"Replan full job queue: {reason}")
+    for j in (result.append_jobs or [])[:5]:
+        tier = "deep" if j.execution_tier == "full_graph" else "quick"
+        lines.append(f"Queue {j.ticker} {j.job_type} ({tier}): {(j.rationale or '').strip()[:80]}")
+    if not lines:
+        return ""
+    return "Proposed actions:\n" + "\n".join(f"  {l}" for l in lines) + "\n\nReply YES to approve or NO to skip."
+
+
+def execute_pending_approval(cfg: Dict[str, Any]) -> str:
+    """Execute whatever is in pending_approval.json. Returns a status string."""
+    pending = load_pending_approval(cfg)
+    if not pending:
+        return "No pending actions found."
+    discard_pending_approval(cfg)
+
+    parts: List[str] = []
+
+    if pending.get("request_replan"):
+        try:
+            from tradingagents.portfolio_advisor.service import run_replan
+            run_replan(cfg, ignore_weekday=True)
+            parts.append("Replan queued.")
+        except Exception as e:
+            parts.append(f"Replan failed: {e}")
+
+    jobs = pending.get("append_jobs") or []
+    if jobs:
+        try:
+            _payload, _pt, tickers, _rows = etoro_scan.fetch_portfolio_rows()
+            live = etoro_scan.current_ticker_set(tickers)
+            st = state.load_state(cfg)
+            now = datetime.now(timezone.utc)
+            new_rows: List[Dict[str, Any]] = []
+            skipped: List[str] = []
+            for i, job in enumerate(jobs[:5]):
+                tid = str(job.get("ticker") or "").strip().upper()
+                if not tid or tid not in live:
+                    skipped.append(tid or "?")
+                    continue
+                when = now + timedelta(minutes=5 + i * 9)
+                new_rows.append({
+                    "id": uuid.uuid4().hex[:20],
+                    "ticker": tid,
+                    "scheduled_at": when.isoformat(),
+                    "kind": "deep_research",
+                    "reason": str(job.get("rationale") or "Human-approved PM job")[:500],
+                    "status": "pending",
+                    "created_at": now.isoformat(),
+                    "execution_tier": str(job.get("execution_tier") or "single_model"),
+                    "job_type": str(job.get("job_type") or "thesis_check"),
+                    "flags": ["PM_APPROVED"],
+                })
+            if new_rows:
+                state.append_jobs(st, new_rows)
+                state.save_state(cfg, st)
+                tickers_queued = [r["ticker"] for r in new_rows]
+                parts.append(f"Queued: {', '.join(tickers_queued)}")
+            if skipped:
+                parts.append(f"Skipped (not in book): {', '.join(skipped)}")
+        except Exception as e:
+            parts.append(f"Job append failed: {e}")
+
+    return " | ".join(parts) if parts else "Done (no actions to execute)."
+
+
 def apply_pm_cycle_followups(cfg: Dict[str, Any], result: AdvisorPMCycleResult) -> Dict[str, Any]:
     """Execute PM-structured replan / extra job requests (Phase 3). Never raises."""
     actions: Dict[str, Any] = {
@@ -410,6 +520,7 @@ def run_pm_cycle(
     *,
     trigger: str = "manual",
     extra_context: Optional[str] = None,
+    hold_for_approval: bool = False,
 ) -> AdvisorPMCycleResult:
     """Run one PM council pass: portfolio snapshot + state → structured plan → logs."""
     set_config(cfg)
@@ -515,7 +626,12 @@ Deliver structured output only. Stances must use tickers you see above. forward_
         raw = llm.invoke([HumanMessage(content=prompt)])
         result = _coerce_pm_result_from_text(_content_from_llm_message(raw))
 
-    actions_taken = apply_pm_cycle_followups(cfg, result)
+    has_proposed_actions = bool(result.request_replan or result.append_jobs)
+    if hold_for_approval and has_proposed_actions:
+        save_pending_approval(cfg, result)
+        actions_taken = {"apply_enabled": False, "held_for_approval": True}
+    else:
+        actions_taken = apply_pm_cycle_followups(cfg, result)
 
     ts = datetime.now(timezone.utc).isoformat()
     row = {

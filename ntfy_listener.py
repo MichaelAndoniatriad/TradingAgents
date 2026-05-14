@@ -138,6 +138,7 @@ def _cmd_help() -> str:
         "  /status         — pending advisor jobs + last replan date\n"
         "  /portfolio      — recent analysis signal summary\n"
         "  /ask <question> — ask the Portfolio Manager anything (or just send plain text)\n"
+        "  yes / no        — approve or discard PM's proposed actions\n"
         "  /help           — this message"
     )
 
@@ -260,14 +261,14 @@ def _cmd_ask(question: str, topic: str) -> str:
         f"    requests.post(f'{{base}}/{{topic}}', data=msg.encode('utf-8'),\n"
         f"        headers={{'Title': title, 'Content-Type': 'text/plain; charset=utf-8'}}, timeout=30)\n"
         f"try:\n"
-        f"    import tradingagents  # loads .env\n"
+        f"    import tradingagents\n"
         f"    from ui.user_config import merged_app_config\n"
-        f"    from tradingagents.portfolio_advisor.advisor_pm import run_pm_cycle\n"
+        f"    from tradingagents.portfolio_advisor.advisor_pm import run_pm_cycle, format_approval_prompt\n"
         f"    cfg = merged_app_config()\n"
-        f"    result = run_pm_cycle(cfg, trigger='ntfy_question', extra_context={q_repr})\n"
+        f"    result = run_pm_cycle(cfg, trigger='ntfy_question', extra_context={q_repr}, hold_for_approval=True)\n"
         f"    summary = (result.executive_summary or '').strip()\n"
-        f"    if len(summary) > 700:\n"
-        f"        summary = summary[:697] + '...'\n"
+        f"    if len(summary) > 500:\n"
+        f"        summary = summary[:497] + '...'\n"
         f"    stances = result.stances or []\n"
         f"    parts = [summary] if summary else ['(no summary)']\n"
         f"    if stances:\n"
@@ -277,8 +278,12 @@ def _cmd_ask(question: str, topic: str) -> str:
         f"                continue\n"
         f"            tk = str(s.get('ticker') or '?')\n"
         f"            st = str(s.get('stance') or '?')\n"
-        f"            ra = str(s.get('rationale') or '')[:120]\n"
+        f"            ra = str(s.get('rationale') or '')[:100]\n"
         f"            parts.append(f'{{tk}} {{st}}: {{ra}}')\n"
+        f"    approval = format_approval_prompt(result)\n"
+        f"    if approval:\n"
+        f"        parts.append('')\n"
+        f"        parts.append(approval)\n"
         f"    post('\\n'.join(parts), title='PM Reply')\n"
         f"except Exception as exc:\n"
         f"    post(f'PM error: {{exc}}', title='PM Error')\n"
@@ -293,6 +298,79 @@ def _cmd_ask(question: str, topic: str) -> str:
         return f"Thinking... answer coming shortly."
     except Exception as exc:  # noqa: BLE001
         return f"Failed to launch PM subprocess: {exc}"
+
+
+def _cmd_yes(topic: str) -> str:
+    """Execute PM's pending proposed actions."""
+    python = sys.executable
+    root_repr = repr(str(_PROJECT_ROOT))
+    topic_repr = repr(topic)
+    inline = (
+        f"import sys, os\n"
+        f"from pathlib import Path\n"
+        f"try:\n"
+        f"    from dotenv import load_dotenv\n"
+        f"    load_dotenv(Path({root_repr}) / '.env', override=False)\n"
+        f"except Exception:\n"
+        f"    pass\n"
+        f"sys.path.insert(0, {root_repr})\n"
+        f"import requests\n"
+        f"topic = os.environ.get('NTFY_TOPIC', {topic_repr})\n"
+        f"base = os.environ.get('NTFY_BASE_URL', 'https://ntfy.sh')\n"
+        f"def post(msg, title='PM'):\n"
+        f"    requests.post(f'{{base}}/{{topic}}', data=msg.encode('utf-8'),\n"
+        f"        headers={{'Title': title, 'Content-Type': 'text/plain; charset=utf-8'}}, timeout=30)\n"
+        f"try:\n"
+        f"    from ui.user_config import merged_app_config\n"
+        f"    from tradingagents.portfolio_advisor.advisor_pm import execute_pending_approval, load_pending_approval\n"
+        f"    cfg = merged_app_config()\n"
+        f"    if not load_pending_approval(cfg):\n"
+        f"        post('No pending actions to approve.', title='PM')\n"
+        f"    else:\n"
+        f"        result = execute_pending_approval(cfg)\n"
+        f"        post(f'Approved. {{result}}', title='PM Approved')\n"
+        f"except Exception as exc:\n"
+        f"    post(f'Approval failed: {{exc}}', title='PM Error')\n"
+    )
+    try:
+        subprocess.Popen(
+            [python, "-c", inline],
+            cwd=str(_PROJECT_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return "Executing approved actions..."
+    except Exception as exc:
+        return f"Failed to execute approval: {exc}"
+
+
+def _cmd_no() -> str:
+    """Discard PM's pending proposed actions."""
+    python = sys.executable
+    root_repr = repr(str(_PROJECT_ROOT))
+    inline = (
+        f"import sys\n"
+        f"from pathlib import Path\n"
+        f"try:\n"
+        f"    from dotenv import load_dotenv\n"
+        f"    load_dotenv(Path({root_repr}) / '.env', override=False)\n"
+        f"except Exception:\n"
+        f"    pass\n"
+        f"sys.path.insert(0, {root_repr})\n"
+        f"from ui.user_config import merged_app_config\n"
+        f"from tradingagents.portfolio_advisor.advisor_pm import discard_pending_approval\n"
+        f"discard_pending_approval(merged_app_config())\n"
+    )
+    try:
+        subprocess.Popen(
+            [python, "-c", inline],
+            cwd=str(_PROJECT_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+    return "Actions discarded."
 
 
 def _cmd_analyze(ticker: str, topic: str) -> str:
@@ -354,6 +432,12 @@ def _dispatch(text: str, topic: str) -> str:
 
     if lower == "/portfolio":
         return _cmd_portfolio()
+
+    if lower in ("yes", "y", "/yes"):
+        return _cmd_yes(topic)
+
+    if lower in ("no", "n", "/no"):
+        return _cmd_no()
 
     if lower.startswith("/analyze"):
         parts = text.split(maxsplit=1)
