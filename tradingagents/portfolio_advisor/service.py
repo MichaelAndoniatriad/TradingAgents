@@ -275,7 +275,7 @@ def run_weekly(cfg: Dict[str, Any], *, ignore_weekday: bool = False) -> str:
         return "skipped_weekday"
     set_config(cfg)
     digest, attention, live = weekly_check.run_weekly_quick_check(cfg)
-    always = bool(cfg.get("portfolio_advisor_weekly_always_email", True))
+    always = bool(cfg.get("portfolio_advisor_weekly_always_email", False))
     worth = weekly_significance.weekly_email_worth_sending(
         cfg, digest, live, attention_flag=attention
     )
