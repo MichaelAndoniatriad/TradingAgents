@@ -222,8 +222,8 @@ def run_single_model_analysis(
         content = "\n".join(parts) if parts else str(content)
     text = str(content).strip()
     if bool(cfg.get("portfolio_advisor_single_model_notify", False)):
-        subj = f"[TradingAgents] Advisor single model run {sym} {jt} {today}"
-        messaging.send_advisor_message(cfg, subj, text[:12000])
+        subj = f"{sym} {jt.replace('_', ' ')}"
+        messaging.send_advisor_message(cfg, subj, messaging.ntfy_verdict(text, sym))
     append_event(
         cfg,
         {

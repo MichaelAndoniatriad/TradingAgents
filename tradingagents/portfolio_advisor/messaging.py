@@ -18,6 +18,41 @@ from tradingagents.advisor.notify import send_webhook
 
 logger = logging.getLogger(__name__)
 
+
+def ntfy_verdict(text: str, ticker: str) -> str:
+    """Extract verdict + required action from analysis text for a short ntfy message."""
+    verdict = ""
+    required_action = ""
+    in_verdict = False
+    in_action = False
+    for line in text.splitlines():
+        s = line.strip()
+        upper = s.upper()
+        if upper == "VERDICT":
+            in_verdict = True
+            in_action = False
+            continue
+        if upper in ("REQUIRED ACTION", "REQUIRED ACTIONS"):
+            in_action = True
+            in_verdict = False
+            continue
+        if s and upper == s and len(s) > 2:
+            in_verdict = False
+            in_action = False
+            continue
+        if in_verdict and s and not verdict:
+            verdict = s[:200]
+        if in_action and s and not required_action and s.lower() != "none":
+            required_action = s[:200]
+    parts = []
+    if verdict:
+        parts.append(verdict)
+    if required_action:
+        parts.append(f"Action: {required_action}")
+    if not parts:
+        parts.append(text[:300])
+    return "\n".join(parts)
+
 _MAX_BODY_PERSISTED = 50000
 
 

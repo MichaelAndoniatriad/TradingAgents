@@ -205,31 +205,14 @@ def run_planning_session(cfg: Dict[str, Any], *, mode: str) -> Tuple[AdvisorPlan
     st["last_portfolio_text_hash"] = hashlib.sha256(portfolio_text.encode("utf-8")).hexdigest()
     state.save_state(cfg, st)
 
-    lines = [
-        f"Portfolio advisor ({mode})",
-        "",
-        plan.executive_summary,
-        "",
-        f"New deep_research jobs queued: {len(new_rows)} (cancelled prior pending: {cancelled})",
-        "",
-    ]
-    if mode == "replan" and prev_pending:
-        lines.append(_diff_pending_jobs_section(prev_pending, new_rows))
-    if plan.immediate_actions:
-        lines.append("Immediate actions:")
-        for a in plan.immediate_actions:
-            lines.append(f"- {a}")
-        lines.append("")
-    if new_rows:
-        lines.append("Scheduled jobs:")
-        for j in new_rows:
-            lines.append(
-                f"- {j['ticker']} @ {j['scheduled_at']} tier {j.get('execution_tier', 'single_model')} "
-                f"type {j.get('job_type', 'routine_monitoring')} {j.get('reason', '')}"
-            )
-    body = "\n".join(lines)
-    subj = f"[TradingAgents] Portfolio advisor — {mode} — {len(new_rows)} jobs"
-    messaging.send_advisor_message(cfg, subj, body)
+    last_date = max((j.get("scheduled_at", "")[:10] for j in new_rows), default="?") if new_rows else "?"
+    action_lines = [f"- {a}" for a in (plan.immediate_actions or [])]
+    body_parts = [f"Replanned: {len(new_rows)} jobs queued through {last_date}."]
+    if action_lines:
+        body_parts.append("Action required:")
+        body_parts.extend(action_lines)
+    subj = f"Replanned — {len(new_rows)} jobs"
+    messaging.send_advisor_message(cfg, subj, "\n".join(body_parts))
     append_event(
         cfg,
         {
@@ -336,11 +319,7 @@ def run_due_jobs(cfg: Dict[str, Any]) -> int:
         if tid not in live:
             state.cancel_job(st, jid, reason="no longer in eToro portfolio")
             state.save_state(cfg, st)
-            messaging.send_advisor_message(
-                cfg,
-                f"[TradingAgents] Advisor job cancelled — {tid}",
-                f"Removed scheduled deep research for {tid} (not in current portfolio).",
-            )
+            messaging.send_advisor_message(cfg, f"{tid} removed from queue", "Not in current portfolio.")
             ran += 1
             continue
         trade_date = date.today().isoformat()
@@ -363,8 +342,8 @@ def run_due_jobs(cfg: Dict[str, Any]) -> int:
                 dec = str(final_state.get("final_trade_decision") or "")
                 messaging.send_advisor_message(
                     cfg,
-                    f"[TradingAgents] Advisor deep run done — {tid}",
-                    f"Completed scheduled research for {tid} on {trade_date}.\n\n{dec[:8000]}",
+                    f"{tid} deep research done",
+                    messaging.ntfy_verdict(dec, tid),
                 )
                 continue
             run_single_model_analysis(cfg, tid, job_type)
@@ -377,7 +356,7 @@ def run_due_jobs(cfg: Dict[str, Any]) -> int:
             j["status"] = "failed"
             j["error"] = str(e)
             state.save_state(cfg, st)
-            messaging.send_advisor_message(cfg, f"[TradingAgents] Advisor run failed — {tid}", str(e))
+            messaging.send_advisor_message(cfg, f"{tid} run failed", str(e)[:200])
             ran += 1
     return ran
 
