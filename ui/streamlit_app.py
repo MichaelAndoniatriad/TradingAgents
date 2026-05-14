@@ -2000,73 +2000,66 @@ Set **`TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_ENABLED=false`** only if you need to p
 
 
 def _render_dashboard_planning_row(cfg: Dict[str, Any]) -> None:
-    st.subheader("Overview")
-    _render_advisor_how_it_works()
-    _render_last_bootstrap_panel(cfg)
-    _render_pm_council_panel(cfg)
-    st.markdown("##### Notifications")
-    _render_notifications_box(cfg)
-    st.markdown("##### Planner calendar")
+    st.subheader("Schedule")
     _render_planner_calendar(cfg)
-    st.markdown("##### Upcoming scheduled work")
     st.caption("Bar height = number of **pending** advisor jobs scheduled on that local calendar day (next 21 days).")
     _render_schedule_timeline_chart(cfg)
 
 
 def _page_dashboard() -> None:
-    _page_header(
-        "Dashboard",
-        "Portfolio snapshot, planner calendar, notifications, schedule chart, deploy/pause, and messages.",
-    )
     cfg = merged_app_config()
-    _render_dashboard_planning_row(cfg)
-
-    st.divider()
-    st.subheader("Deploy and automation")
-    st.caption(
-        "**Pause** only stops local **Clerk** weekly/monthly cron scripts (marker file under "
-        "`~/.tradingagents/automation/`). It does not stop `advisor portfolio` crons unless you disable those separately."
-    )
-    full_scan = st.checkbox(
-        "Full portfolio scan on deploy (after first-time init, runs the multi-agent graph on each holding — high cost)",
-        value=False,
-        key="dash_full_scan",
-    )
-
-    c0, c1, c2 = st.columns([1.2, 1, 1])
-    with c0:
-        open_msgs = st.button("View all messages", use_container_width=True, key="dash_open_msgs")
     paused = _automation_paused()
-    with c1:
-        deploy = st.button(
-            "Deploy",
-            type="primary",
-            use_container_width=True,
-            disabled=not _etoro_env_configured(),
-            key="dash_deploy",
-        )
-    with c2:
+
+    # ── Header + controls ──────────────────────────────────────────────────
+    hdr_col, ctrl_col = st.columns([2, 3])
+    with hdr_col:
+        st.title("Dashboard")
         if paused:
-            resume = st.button("Resume", use_container_width=True, key="dash_resume")
-            pause_clicked = False
+            st.markdown(
+                "<span style='color:#dc2626;font-weight:600;font-size:0.9rem'>&#9679; Automation paused</span>",
+                unsafe_allow_html=True,
+            )
         else:
-            resume = False
-            pause_clicked = st.button("Pause", use_container_width=True, key="dash_pause")
+            st.markdown(
+                "<span style='color:#16a34a;font-weight:600;font-size:0.9rem'>&#9679; Automation running</span>",
+                unsafe_allow_html=True,
+            )
+    with ctrl_col:
+        st.write("")
+        c_msgs, c_deploy, c_pause = st.columns(3)
+        with c_msgs:
+            open_msgs = st.button("Messages", use_container_width=True, key="dash_open_msgs")
+        with c_deploy:
+            deploy = st.button(
+                "Deploy",
+                type="primary",
+                use_container_width=True,
+                disabled=not _etoro_env_configured(),
+                key="dash_deploy",
+            )
+        with c_pause:
+            if paused:
+                resume = st.button("Resume", use_container_width=True, key="dash_resume")
+                pause_clicked = False
+            else:
+                resume = False
+                pause_clicked = st.button("Pause", use_container_width=True, key="dash_pause")
 
     if open_msgs:
         _messages_dialog()
 
     if resume and paused:
         set_clerk_scheduled_automation_paused(False)
-        st.success("Clerk scheduled automation resumed.")
+        st.success("Automation resumed.")
         st.rerun()
 
     if not paused and pause_clicked:
         set_clerk_scheduled_automation_paused(True)
-        st.info("Clerk scheduled automation paused. Use **Resume** to continue.")
+        st.info("Automation paused. Use **Resume** to continue.")
         st.rerun()
 
     if deploy and _etoro_env_configured():
+        full_scan = bool(st.session_state.get("dash_full_scan", False))
         try:
             from tradingagents.portfolio_advisor import service as pa_service
 
@@ -2097,55 +2090,79 @@ def _page_dashboard() -> None:
         note = str(st.session_state[_SS_PORT_NOTE])
         if "failed" in note.lower():
             st.error(note)
-        elif "skipped" in note.lower():
-            st.warning(note)
-        elif "already initialized" in note.lower():
+        elif "skipped" in note.lower() or "already initialized" in note.lower():
             st.warning(note)
         else:
             st.success(note)
 
-    if _etoro_env_configured():
-        if st.button("Refresh advisor status", key="dash_ref_status"):
-            try:
-                from tradingagents.portfolio_advisor import service as pa_service
+    # ── Portfolio ──────────────────────────────────────────────────────────
+    st.divider()
+    _render_etoro_portfolio_block(show_export=False, compact_title=True)
 
-                st.session_state[_SS_PORT_STATUS] = pa_service.status_text(cfg)
-            except Exception as e:
-                st.session_state[_SS_PORT_STATUS] = f"Status unavailable: {e}"
-            st.rerun()
-        if _SS_PORT_STATUS not in st.session_state:
-            try:
-                from tradingagents.portfolio_advisor import service as pa_service
+    # ── Agent activity ─────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Agent activity")
+    _render_notifications_box(cfg)
 
-                st.session_state[_SS_PORT_STATUS] = pa_service.status_text(cfg)
-            except Exception:
-                st.session_state[_SS_PORT_STATUS] = "(not loaded)"
-        with st.expander("Advisor state / queue", expanded=False):
+    # ── Schedule ───────────────────────────────────────────────────────────
+    st.divider()
+    _render_dashboard_planning_row(cfg)
+
+    # ── System status (collapsed) ──────────────────────────────────────────
+    st.divider()
+    with st.expander("System status & advanced", expanded=False):
+        _render_last_bootstrap_panel(cfg)
+        st.divider()
+        _render_pm_council_panel(cfg)
+
+        if _etoro_env_configured():
+            st.divider()
+            if st.button("Refresh advisor status", key="dash_ref_status"):
+                try:
+                    from tradingagents.portfolio_advisor import service as pa_service
+
+                    st.session_state[_SS_PORT_STATUS] = pa_service.status_text(cfg)
+                except Exception as e:
+                    st.session_state[_SS_PORT_STATUS] = f"Status unavailable: {e}"
+                st.rerun()
+            if _SS_PORT_STATUS not in st.session_state:
+                try:
+                    from tradingagents.portfolio_advisor import service as pa_service
+
+                    st.session_state[_SS_PORT_STATUS] = pa_service.status_text(cfg)
+                except Exception:
+                    st.session_state[_SS_PORT_STATUS] = "(not loaded)"
             st.text_area(
                 "Portfolio advisor state",
                 value=str(st.session_state.get(_SS_PORT_STATUS, "(not loaded)")),
-                height=220,
+                height=180,
                 key="dash_pa_status_area",
                 label_visibility="collapsed",
                 disabled=True,
             )
-        if st.button("Export jobs & timestamps catalogue (MD + JSON)", key="dash_export_catalogue"):
-            try:
-                from tradingagents.portfolio_advisor.catalogue import write_advisor_catalogue
+            st.divider()
+            st.checkbox(
+                "Full portfolio scan on deploy (high cost — runs multi-agent graph on each holding)",
+                value=False,
+                key="dash_full_scan",
+            )
+            if st.button("Export jobs & timestamps catalogue (MD + JSON)", key="dash_export_catalogue"):
+                try:
+                    from tradingagents.portfolio_advisor.catalogue import write_advisor_catalogue
 
-                paths = write_advisor_catalogue(cfg, write_json=True)
-                st.success("Wrote:\n" + "\n".join(f"- **{k}:** `{v}`" for k, v in paths.items()))
-            except Exception as e:
-                st.error(str(e))
+                    paths = write_advisor_catalogue(cfg, write_json=True)
+                    st.success("Wrote:\n" + "\n".join(f"- **{k}:** `{v}`" for k, v in paths.items()))
+                except Exception as e:
+                    st.error(str(e))
+            with st.expander("Export watchlist JSON", expanded=False):
+                _render_etoro_export_section(key_prefix="dash_etoro")
 
-    if _etoro_env_configured():
-        with st.expander("Export watchlist JSON", expanded=False):
-            _render_etoro_export_section(key_prefix="dash_etoro")
-
-    with st.expander("Full activity feed (verbose)", expanded=False):
-        _render_activity_feed(cfg)
-
-    _render_event_log_expander(cfg)
+        st.divider()
+        with st.expander("Full activity feed (verbose)", expanded=False):
+            _render_activity_feed(cfg)
+        _render_event_log_expander(cfg)
+        st.divider()
+        _render_advisor_how_it_works()
 
 
 def _settings_memory_tab() -> None:

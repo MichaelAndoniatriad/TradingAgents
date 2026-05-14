@@ -146,6 +146,7 @@ def _cmd_help() -> str:
         "  /analyze TICKER — one-off analysis for a ticker (e.g. /analyze AAPL)\n"
         "  /status         — pending advisor jobs + last replan date\n"
         "  /portfolio      — recent analysis signal summary\n"
+        "  /ask <question> — ask the Portfolio Manager anything (or just send plain text)\n"
         "  /help           — this message"
     )
 
@@ -237,6 +238,72 @@ def _extract_decision(text: str) -> str:
     return ""
 
 
+def _cmd_ask(question: str, topic: str) -> str:
+    """Send a freeform question to the PM and reply with its response via ntfy.
+
+    Runs async (subprocess) so the listener loop stays unblocked.
+    Sends an immediate ACK, then a follow-up with the PM's answer.
+    """
+    question = question.strip()
+    if not question:
+        return "Usage: /ask <question>  (or just type any plain-text message)"
+
+    python = sys.executable
+    q_repr = repr(question)
+    topic_repr = repr(topic)
+    root_repr = repr(str(_PROJECT_ROOT))
+
+    inline = (
+        f"import sys, os, json\n"
+        f"from pathlib import Path\n"
+        f"try:\n"
+        f"    from dotenv import load_dotenv\n"
+        f"    load_dotenv(Path({root_repr}) / '.env', override=False)\n"
+        f"except Exception:\n"
+        f"    pass\n"
+        f"sys.path.insert(0, {root_repr})\n"
+        f"import requests\n"
+        f"topic = os.environ.get('NTFY_TOPIC', {topic_repr})\n"
+        f"base = os.environ.get('NTFY_BASE_URL', 'https://ntfy.sh')\n"
+        f"def post(msg, title='PM'):\n"
+        f"    requests.post(f'{{base}}/{{topic}}', data=msg.encode('utf-8'),\n"
+        f"        headers={{'Title': title, 'Content-Type': 'text/plain; charset=utf-8'}}, timeout=30)\n"
+        f"try:\n"
+        f"    import tradingagents  # loads .env\n"
+        f"    from ui.user_config import merged_app_config\n"
+        f"    from tradingagents.portfolio_advisor.advisor_pm import run_pm_cycle\n"
+        f"    cfg = merged_app_config()\n"
+        f"    result = run_pm_cycle(cfg, trigger='ntfy_question', extra_context={q_repr})\n"
+        f"    summary = (result.executive_summary or '').strip()\n"
+        f"    if len(summary) > 700:\n"
+        f"        summary = summary[:697] + '...'\n"
+        f"    stances = result.stances or []\n"
+        f"    parts = [summary] if summary else ['(no summary)']\n"
+        f"    if stances:\n"
+        f"        parts.append('')\n"
+        f"        for s in stances[:5]:\n"
+        f"            if not isinstance(s, dict):\n"
+        f"                continue\n"
+        f"            tk = str(s.get('ticker') or '?')\n"
+        f"            st = str(s.get('stance') or '?')\n"
+        f"            ra = str(s.get('rationale') or '')[:120]\n"
+        f"            parts.append(f'{{tk}} {{st}}: {{ra}}')\n"
+        f"    post('\\n'.join(parts), title='PM Reply')\n"
+        f"except Exception as exc:\n"
+        f"    post(f'PM error: {{exc}}', title='PM Error')\n"
+    )
+    try:
+        subprocess.Popen(
+            [python, "-c", inline],
+            cwd=str(_PROJECT_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return f"Thinking... answer coming shortly."
+    except Exception as exc:  # noqa: BLE001
+        return f"Failed to launch PM subprocess: {exc}"
+
+
 def _cmd_analyze(ticker: str, topic: str) -> str:
     """Trigger a one-off advisor run-due for the given ticker.
 
@@ -303,12 +370,17 @@ def _dispatch(text: str, topic: str) -> str:
             return "Usage: /analyze TICKER  (e.g. /analyze AAPL)"
         return _cmd_analyze(parts[1].strip(), topic)
 
+    if lower.startswith("/ask"):
+        parts = text.split(maxsplit=1)
+        question = parts[1].strip() if len(parts) > 1 else ""
+        return _cmd_ask(question, topic)
+
     # Unknown command
     if text.startswith("/"):
         return f"Unknown command: {text!r}\nSend /help for a list of available commands."
 
-    # Non-command messages: silently ignore
-    return ""
+    # Plain text (no leading slash) → route to PM as a question
+    return _cmd_ask(text, topic)
 
 
 # ---------------------------------------------------------------------------
