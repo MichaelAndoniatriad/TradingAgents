@@ -1209,6 +1209,7 @@ def _render_etoro_portfolio_block(
     show_export: bool,
     compact_title: bool = False,
     show_section_title: bool = True,
+    key_prefix: str = "etoro",
 ) -> None:
     if not _etoro_env_configured():
         return
@@ -1220,7 +1221,7 @@ def _render_etoro_portfolio_block(
     with c0:
         st.caption("Read-only data from your eToro API keys. This app does not send orders.")
     with c1:
-        if st.button("Refresh", key=f"etoro_snap_refresh_{show_export}", use_container_width=True):
+        if st.button("Refresh", key=f"{key_prefix}_snap_refresh", use_container_width=True):
             st.session_state.pop("etoro_snap", None)
             st.rerun()
 
@@ -2097,7 +2098,7 @@ def _page_dashboard() -> None:
 
     # ── Portfolio ──────────────────────────────────────────────────────────
     st.divider()
-    _render_etoro_portfolio_block(show_export=False, compact_title=True)
+    _render_etoro_portfolio_block(show_export=False, compact_title=True, key_prefix="dash_etoro")
 
     # ── Agent activity ─────────────────────────────────────────────────────
     st.divider()
@@ -2507,7 +2508,7 @@ def main() -> None:
     page = _sidebar_shell()
 
     if _etoro_env_configured() and page == "Dashboard":
-        _render_etoro_portfolio_block(show_export=False, compact_title=True, show_section_title=True)
+        _render_etoro_portfolio_block(show_export=False, compact_title=True, show_section_title=True, key_prefix="fa_etoro")
     elif not _etoro_env_configured() and page == "Dashboard":
         st.caption(
             "eToro: set **ETORO_API_KEY** and **ETORO_USER_KEY** in `.env` to show a portfolio summary above."
