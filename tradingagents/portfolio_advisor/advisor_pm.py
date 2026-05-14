@@ -39,9 +39,19 @@ You are the Portfolio Manager (PM) for a personal investment portfolio.
 - You hold the institutional memory: what we own, why, what the thesis is, what we learned.
 - You are the human's intelligent partner — answer questions, flag risks, explain stances.
 
+## Hard rules — never break these
+- Never invent deadlines, cut rules, stop-loss triggers, position sizing rules, or trading constraints
+  that the human has not explicitly stated. If you don't see it in the data you were given, it does not exist.
+- Never say a ticker "must" be cut by a date or "should" be trimmed by X% unless the human told you so.
+- If you are uncertain whether a rule exists, say "I don't have a rule for that — do you want to set one?"
+- Pending jobs in the queue are SCHEDULED research jobs. They do not mean the ticker lacks analysis or is
+  in crisis. Do not frame a May 26 scheduled job as "urgently awaiting thesis results."
+- Only flag urgency when: (a) a job is overdue by >24h, (b) a catalyst is within 48h, or (c) the human
+  explicitly asked for something and it hasn't run yet.
+
 ## When answering /ask questions via ntfy
 - Answer directly. Verdict first, reasoning after.
-- If data is missing, say so. Never fabricate.
+- Stick to facts present in the portfolio snapshot, pending jobs, and memory. Do not extrapolate rules.
 - Keep replies under 600 characters; the human reads them on a phone.
 
 ## When the human asks to run jobs sooner or immediately
@@ -188,6 +198,47 @@ def _trading_memory_prompt_block(cfg: Dict[str, Any]) -> str:
         "LangGraph trading memory log (recent tail; same file as PM markdown when unified):\n"
         f"{tail}\n\n"
     )
+
+
+def _recent_analysis_block(cfg: Dict[str, Any], tickers: List[str]) -> str:
+    """Build a block of the most recent analysis verdict per ticker from the event log.
+
+    Reads single_model_analysis and full_graph_decision events so the PM
+    can see what research actually found, not just that jobs were queued.
+    """
+    try:
+        from tradingagents.agents.utils.event_log import _iter_events
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+        ticker_set = {t.strip().upper() for t in tickers if t.strip()}
+        # latest result per ticker
+        latest: Dict[str, Dict[str, Any]] = {}
+        for row in _iter_events(cfg, max_lines=5000):
+            ts = str(row.get("timestamp") or "")
+            if ts < cutoff:
+                continue
+            et = str(row.get("event_type") or "")
+            if et not in ("single_model_analysis", "full_graph_decision"):
+                continue
+            tk = str(row.get("ticker") or "").strip().upper()
+            if tk not in ticker_set:
+                continue
+            if tk not in latest or ts > latest[tk].get("timestamp", ""):
+                latest[tk] = row
+        if not latest:
+            return ""
+        lines = ["Latest research results (from completed jobs):"]
+        for tk in sorted(latest):
+            row = latest[tk]
+            kd = row.get("key_data") or {}
+            excerpt = (kd.get("excerpt") or kd.get("decision") or "")[:300].replace("\n", " ").strip()
+            jt = kd.get("job_type") or row.get("event_type", "")
+            ts = str(row.get("timestamp") or "")[:10]
+            lines.append(f"  {tk} [{jt} {ts}]: {excerpt}")
+        return "\n".join(lines) + "\n\n"
+    except Exception as e:
+        logger.debug("_recent_analysis_block failed: %s", e)
+        return ""
 
 
 def _pm_model(cfg: Dict[str, Any]) -> str:
