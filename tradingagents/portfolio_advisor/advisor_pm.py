@@ -22,6 +22,93 @@ from tradingagents.portfolio_advisor.prompt_limits import cfg_int as _pm_int
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# PM_CLAUDE.md + PM_MEMORY.md — structured memory system for the PM
+# ---------------------------------------------------------------------------
+
+_PM_CLAUDE_DEFAULT = """\
+# Portfolio Manager Standing Instructions
+
+You are the Portfolio Manager (PM) for a personal investment portfolio.
+
+## Role
+- Advisory only: you recommend, the human decides and executes.
+- You hold the institutional memory: what we own, why, what the thesis is, what we learned.
+- You are the human's intelligent partner — answer questions, flag risks, explain stances.
+
+## When answering /ask questions via ntfy
+- Answer directly. Verdict first, reasoning after.
+- If data is missing, say so. Never fabricate.
+- Keep replies under 600 characters; the human reads them on a phone.
+
+## Memory discipline
+- Write memory_note as if briefing your next self: what mattered, what changed, what to watch.
+- One tight paragraph. No filler. No AI patterns.
+"""
+
+_PM_MEMORY_SEPARATOR = "\n---\n"
+
+
+def _pm_claude_path(cfg: Dict[str, Any]) -> Path:
+    return state.advisor_dir(cfg) / "PM_CLAUDE.md"
+
+
+def _pm_memory_structured_path(cfg: Dict[str, Any]) -> Path:
+    return state.advisor_dir(cfg) / "PM_MEMORY.md"
+
+
+def _ensure_pm_claude_md(cfg: Dict[str, Any]) -> None:
+    p = _pm_claude_path(cfg)
+    if not p.is_file():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_PM_CLAUDE_DEFAULT, encoding="utf-8")
+
+
+def _read_pm_claude_md(cfg: Dict[str, Any]) -> str:
+    p = _pm_claude_path(cfg)
+    if not p.is_file():
+        return ""
+    try:
+        return p.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _read_pm_memory_structured(cfg: Dict[str, Any]) -> str:
+    p = _pm_memory_structured_path(cfg)
+    if not p.is_file():
+        return ""
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    cap = _pm_int(cfg, "portfolio_advisor_pm_memory_md_prompt_chars", 6000, 500, 30000)
+    return text[-cap:] if len(text) > cap else text
+
+
+def _write_pm_memory_update(cfg: Dict[str, Any], memory_note: str, trigger: str) -> None:
+    note = (memory_note or "").strip()
+    if not note:
+        return
+    p = _pm_memory_structured_path(cfg)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    entry = f"## {ts} — {trigger}\n{note}\n"
+    existing = ""
+    if p.is_file():
+        try:
+            existing = p.read_text(encoding="utf-8")
+        except OSError:
+            pass
+    new_content = (existing + _PM_MEMORY_SEPARATOR + entry) if existing else entry
+    max_chars = _pm_int(cfg, "portfolio_advisor_pm_memory_md_max_chars", 40000, 2000, 200000)
+    if len(new_content) > max_chars:
+        new_content = new_content[-max_chars:]
+        idx = new_content.find("\n## ")
+        if idx > 0:
+            new_content = new_content[idx + 1:]
+    p.write_text(new_content, encoding="utf-8")
+
 
 def pm_log_path(cfg: Dict[str, Any]) -> Path:
     raw = cfg.get("portfolio_advisor_pm_log_path")
@@ -328,6 +415,10 @@ def run_pm_cycle(
     set_config(cfg)
     trigger_s = (trigger or "manual").strip()[:80] or "manual"
 
+    _ensure_pm_claude_md(cfg)
+    pm_claude = _read_pm_claude_md(cfg)
+    pm_memory = _read_pm_memory_structured(cfg)
+
     _payload, portfolio_text, tickers, _rows = etoro_scan.fetch_portfolio_rows()
     if not tickers:
         raise RuntimeError("No tickers in eToro portfolio export.")
@@ -366,8 +457,10 @@ def run_pm_cycle(
     prior_txt = _prior_pm_context(cfg)
     prior_block = f"Prior PM context (most recent cycles):\n{prior_txt}\n\n" if prior_txt else ""
     tm_block = _trading_memory_prompt_block(cfg)
+    claude_block = f"{pm_claude}\n\n" if pm_claude else ""
+    memory_block = f"Your working memory (PM_MEMORY.md — recent notes to self):\n{pm_memory}\n\n" if pm_memory else ""
 
-    prompt = f"""You are the portfolio manager for a research stack. Advisory only: no trade orders, no claims that trades executed.
+    prompt = f"""{claude_block}You are the portfolio manager for a research stack. Advisory only: no trade orders, no claims that trades executed.
 
 Authority: the human controls the real portfolio and every execution decision. LangGraph and lighter single-model passes are research tools — treat their outputs as inputs, not as orders or fills.
 
@@ -375,7 +468,7 @@ Execution tiers (for append_jobs only): "full_graph" runs the full multi-agent p
 
 Trigger for this cycle: {trigger_s}
 
-Portfolio snapshot (truncated):
+{memory_block}Portfolio snapshot (truncated):
 {portfolio_excerpt}
 
 Live tickers (normalized): {", ".join(sorted(etoro_scan.current_ticker_set(tickers)))}
@@ -434,6 +527,7 @@ Deliver structured output only. Stances must use tickers you see above. forward_
     }
     _append_pm_jsonl(cfg, row)
     _append_pm_memory_md(cfg, trigger=trigger_s, result=result, actions_taken=actions_taken)
+    _write_pm_memory_update(cfg, result.memory_note, trigger_s)
 
     st2 = state.load_state(cfg)
     st2["last_pm_cycle_iso"] = ts
@@ -490,6 +584,35 @@ def run_pm_after_full_graph_if_enabled(
         logger.exception("Advisor PM after LangGraph failed for %s", sym)
 
 
+def _outcome_lines_for_removed(cfg: Dict[str, Any], removed: List[str]) -> List[str]:
+    """Return short outcome summary lines for recently closed tickers (best-effort)."""
+    from tradingagents.agents.utils import event_log as el
+
+    lines: List[str] = []
+    try:
+        events = list(el._iter_events(cfg, max_lines=8000))
+    except Exception:
+        return lines
+    seen: set = set()
+    for row in reversed(events):
+        et = str(row.get("event_type") or "")
+        if et not in ("outcome_recorded", "partial_close_outcome"):
+            continue
+        sym = str(row.get("ticker") or "").strip().upper()
+        if sym not in removed or sym in seen:
+            continue
+        seen.add(sym)
+        kd = row.get("key_data") if isinstance(row.get("key_data"), dict) else {}
+        align = str(row.get("outcome") or kd.get("outcome_alignment") or "unknown")
+        pnl = kd.get("pnl_pct")
+        decision = kd.get("decision_was") or ""
+        pnl_str = f"{float(pnl):+.1f}%" if pnl is not None else "n/a"
+        lines.append(f"- {sym}: decision={decision or 'unknown'}, alignment={align}, pnl_proxy={pnl_str}")
+        if len(seen) >= 8:
+            break
+    return lines
+
+
 def optional_pm_cycle_on_portfolio_change(
     cfg: Dict[str, Any],
     *,
@@ -524,6 +647,14 @@ def optional_pm_cycle_on_portfolio_change(
             "Portfolio snapshot fingerprint changed: "
             f"{str(old_portfolio_text_hash)[:16]}… → {str(new_portfolio_text_hash)[:16]}…"
         )
+
+    # Outcome feedback: look up alignment for each removed ticker and surface it to the PM.
+    if tr:
+        outcome_lines = _outcome_lines_for_removed(cfg, tr)
+        if outcome_lines:
+            lines.append("\nOutcome alignments for closed positions (yfinance proxy, not eToro fills):")
+            lines.extend(outcome_lines)
+
     extra = "\n".join(lines) if lines else "Portfolio change signal (no ticker list diff captured)."
     try:
         run_pm_cycle(cfg, trigger=trigger, extra_context=extra)
