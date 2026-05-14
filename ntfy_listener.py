@@ -46,6 +46,8 @@ REQUEST_TIMEOUT = 15  # seconds
 LOG_DIR = Path.home() / ".tradingagents" / "logs"
 LOG_FILE = LOG_DIR / "ntfy_listener.log"
 
+CHAT_HISTORY_PATH = Path.home() / ".tradingagents" / "portfolio_advisor" / "ntfy_chat_history.jsonl"
+
 # Track IDs of our own outgoing messages to avoid echo-processing them.
 # deque enforces the bound automatically; the set gives O(1) membership tests.
 _SENT_IDS: set[str] = set()
@@ -97,6 +99,7 @@ def _ntfy_publish(topic: str, message: str, title: str = "PM") -> None:
                 _SENT_IDS.discard(_SENT_IDS_QUEUE[0])
             _SENT_IDS_QUEUE.append(msg_id)
             _SENT_IDS.add(msg_id)
+        _log_chat("pm", message)
         log.info("SENT reply (%d chars)", len(message))
     except Exception as exc:  # noqa: BLE001
         log.error("Failed to publish ntfy reply: %s", exc)
@@ -126,6 +129,49 @@ def _stream_messages(topic: str, since: str):
             msg_id = msg.get("id", "")
             new_since = msg_id if msg_id else since
             yield msg, new_since
+
+# ---------------------------------------------------------------------------
+# Chat history — log every exchange so the PM has conversation context
+# ---------------------------------------------------------------------------
+
+def _log_chat(role: str, text: str) -> None:
+    """Append one message to the rolling chat history JSONL."""
+    try:
+        CHAT_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        entry = json.dumps({
+            "role": role,
+            "text": text[:600],
+            "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        })
+        with open(CHAT_HISTORY_PATH, "a", encoding="utf-8") as f:
+            f.write(entry + "\n")
+    except Exception:
+        pass
+
+
+def _read_chat_context(n: int = 10) -> str:
+    """Return the last n exchanges formatted for the PM prompt."""
+    if not CHAT_HISTORY_PATH.is_file():
+        return ""
+    try:
+        lines = CHAT_HISTORY_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    entries = []
+    for line in lines[-n * 2:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    if not entries:
+        return ""
+    parts = [f"[{e['ts']}] {'You' if e['role'] == 'user' else 'PM'}: {e['text']}"
+             for e in entries[-n:]]
+    return "Recent conversation:\n" + "\n".join(parts)
+
 
 # ---------------------------------------------------------------------------
 # Command handlers
@@ -260,12 +306,34 @@ def _cmd_ask(question: str, topic: str) -> str:
         f"def post(msg, title='PM'):\n"
         f"    requests.post(f'{{base}}/{{topic}}', data=msg.encode('utf-8'),\n"
         f"        headers={{'Title': title, 'Content-Type': 'text/plain; charset=utf-8'}}, timeout=30)\n"
+        f"    try:\n"
+        f"        import json as _j\n"
+        f"        from pathlib import Path\n"
+        f"        from datetime import datetime\n"
+        f"        _p = Path.home() / '.tradingagents' / 'portfolio_advisor' / 'ntfy_chat_history.jsonl'\n"
+        f"        _p.parent.mkdir(parents=True, exist_ok=True)\n"
+        f"        _e = _j.dumps({{'role':'pm','text':msg[:600],'ts':datetime.now().strftime('%Y-%m-%d %H:%M')}})\n"
+        f"        _p.open('a').write(_e+'\\n')\n"
+        f"    except Exception: pass\n"
         f"try:\n"
         f"    import tradingagents\n"
         f"    from ui.user_config import merged_app_config\n"
         f"    from tradingagents.portfolio_advisor.advisor_pm import run_pm_cycle, format_approval_prompt\n"
+        f"    from pathlib import Path\n"
         f"    cfg = merged_app_config()\n"
-        f"    result = run_pm_cycle(cfg, trigger='ntfy_question', extra_context={q_repr}, hold_for_approval=True)\n"
+        f"    _chat_path = Path.home() / '.tradingagents' / 'portfolio_advisor' / 'ntfy_chat_history.jsonl'\n"
+        f"    _chat_ctx = ''\n"
+        f"    if _chat_path.is_file():\n"
+        f"        import json as _json\n"
+        f"        _lines = _chat_path.read_text(encoding='utf-8').splitlines()\n"
+        f"        _entries = []\n"
+        f"        for _l in _lines[-20:]:\n"
+        f"            try: _entries.append(_json.loads(_l))\n"
+        f"            except: pass\n"
+        f"        _parts = [f\"[{{e['ts']}}] {{'You' if e['role']=='user' else 'PM'}}: {{e['text']}}\" for e in _entries[-10:]]\n"
+        f"        if _parts: _chat_ctx = 'Recent conversation:\\n' + '\\n'.join(_parts)\n"
+        f"    _full_ctx = (_chat_ctx + '\\n\\nCurrent question: ' + {q_repr}).strip() if _chat_ctx else {q_repr}\n"
+        f"    result = run_pm_cycle(cfg, trigger='ntfy_question', extra_context=_full_ctx, hold_for_approval=True)\n"
         f"    summary = (result.executive_summary or '').strip()\n"
         f"    if len(summary) > 500:\n"
         f"        summary = summary[:497] + '...'\n"
@@ -490,7 +558,10 @@ def main() -> None:
                 if msg_event != "message":
                     continue
 
+                # Skip our own outgoing messages (tracked by ID or title)
                 if msg_id in _SENT_IDS:
+                    continue
+                if (msg.get("title") or "").strip() == "PM":
                     continue
 
                 text = (msg.get("message") or "").strip()
@@ -498,6 +569,7 @@ def main() -> None:
                     continue
 
                 log.info("RECV [%s] %r", msg_id, text[:120])
+                _log_chat("user", text)
 
                 reply = _dispatch(text, NTFY_TOPIC)
                 if reply:
