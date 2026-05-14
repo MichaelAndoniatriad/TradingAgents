@@ -595,13 +595,21 @@ def apply_pm_cycle_followups(cfg: Dict[str, Any], result: AdvisorPMCycleResult) 
 
 
 def _notify_action_stances(cfg: Dict[str, Any], result: AdvisorPMCycleResult) -> None:
-    """Push a short ntfy alert if PM has sell or trim stances. Silent on error."""
+    """Update action log from PM stances; push alert for new/changed sell/trim. Silent on error."""
     try:
-        action = [s for s in (result.stances or []) if s.stance in ("sell", "trim")]
-        if not action:
-            return
         from tradingagents.portfolio_advisor import messaging
-        lines = [f"{s.ticker} {s.stance.upper()}: {(s.rationale or '').strip()[:120]}" for s in action]
+        from tradingagents.portfolio_advisor.action_log import upsert_action, mark_done
+        action_stances = [s for s in (result.stances or []) if s.stance in ("sell", "trim")]
+        # Auto-close items where stance has improved away from sell/trim
+        for s in (result.stances or []):
+            if s.stance not in ("sell", "trim"):
+                mark_done(cfg, s.ticker)
+        if not action_stances:
+            return
+        lines = []
+        for s in action_stances:
+            upsert_action(cfg, s.ticker, s.stance, (s.rationale or "").strip(), source="pm_cycle")
+            lines.append(f"{s.ticker} {s.stance.upper()}: {(s.rationale or '').strip()[:120]}")
         body = "Action required:\n" + "\n".join(lines)
         messaging.send_advisor_message(cfg, "Action required", body)
     except Exception as e:

@@ -185,6 +185,7 @@ def _cmd_help() -> str:
         "  /portfolio      — recent analysis signal summary\n"
         "  /ask <question> — ask the Portfolio Manager anything (or just send plain text)\n"
         "  cancel          — undo the last PM action (cancels queued jobs)\n"
+        "  done TICKER     — mark action item closed (e.g. done TEAM)\n"
         "  /help           — this message"
     )
 
@@ -481,6 +482,42 @@ def _cmd_cancel(topic: str) -> str:
         return f"Failed to launch cancel subprocess: {exc}"
 
 
+def _cmd_done(ticker: str) -> str:
+    """Mark open action items for a ticker as done."""
+    python = sys.executable
+    root_repr = repr(str(_PROJECT_ROOT))
+    ticker_repr = repr(ticker.strip().upper())
+    inline = (
+        f"import sys\n"
+        f"from pathlib import Path\n"
+        f"try:\n"
+        f"    from dotenv import load_dotenv\n"
+        f"    load_dotenv(Path({root_repr}) / '.env', override=False)\n"
+        f"except Exception:\n"
+        f"    pass\n"
+        f"sys.path.insert(0, {root_repr})\n"
+        f"from ui.user_config import merged_app_config\n"
+        f"from tradingagents.portfolio_advisor.action_log import mark_done\n"
+        f"cfg = merged_app_config()\n"
+        f"n = mark_done(cfg, {ticker_repr})\n"
+        f"import requests, os\n"
+        f"base = os.environ.get('NTFY_BASE_URL', 'https://ntfy.sh')\n"
+        f"topic = os.environ.get('NTFY_TOPIC', 'default')\n"
+        f"msg = f'{ticker_repr[1:-1]} done: closed {{n}} action item(s).' if n else f'No open actions found for {ticker_repr[1:-1]}.'\n"
+        f"requests.post(f'{{base}}/{{topic}}', data=msg.encode(), headers={{'Title': 'PM'}}, timeout=30)\n"
+    )
+    try:
+        subprocess.Popen(
+            [python, "-c", inline],
+            cwd=str(_PROJECT_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return ""
+    except Exception as exc:
+        return f"Failed to mark done: {exc}"
+
+
 def _cmd_analyze(ticker: str, topic: str) -> str:
     """Trigger a one-off advisor run-due for the given ticker.
 
@@ -549,6 +586,12 @@ def _dispatch(text: str, topic: str) -> str:
 
     if lower in ("no", "n", "/no"):
         return _cmd_no()
+
+    if lower.startswith("/done") or lower.startswith("done "):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            return "Usage: done TICKER  (e.g. done TEAM)"
+        return _cmd_done(parts[1].strip())
 
     if lower.startswith("/analyze"):
         parts = text.split(maxsplit=1)

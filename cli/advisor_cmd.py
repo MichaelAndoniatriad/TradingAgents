@@ -217,6 +217,25 @@ def portfolio_advisor_run_due(
         raise typer.Exit(1) from e
 
 
+@portfolio_app.command("morning-digest")
+def portfolio_morning_digest(
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Send morning digest of open action items via ntfy."""
+    _configure_logging(verbose)
+    cfg = DEFAULT_CONFIG.copy()
+    try:
+        from tradingagents.portfolio_advisor.action_log import run_morning_digest
+        sent = run_morning_digest(cfg)
+        if sent:
+            console.print("[green]Morning digest sent.[/green]")
+        else:
+            console.print("[yellow]No open action items — nothing sent.[/yellow]")
+    except Exception as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+
+
 @portfolio_app.command("watchdog")
 def portfolio_advisor_watchdog(
     force: bool = typer.Option(

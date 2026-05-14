@@ -345,8 +345,18 @@ def run_due_jobs(cfg: Dict[str, Any]) -> int:
                     f"{tid} deep research done",
                     messaging.ntfy_verdict(dec, tid),
                 )
+                try:
+                    from tradingagents.portfolio_advisor.action_log import ingest_from_analysis
+                    ingest_from_analysis(cfg, tid, dec, source="full_graph")
+                except Exception:
+                    pass
                 continue
-            run_single_model_analysis(cfg, tid, job_type)
+            analysis_text = run_single_model_analysis(cfg, tid, job_type)
+            try:
+                from tradingagents.portfolio_advisor.action_log import ingest_from_analysis
+                ingest_from_analysis(cfg, tid, analysis_text or "", source=f"single_model_{job_type}")
+            except Exception:
+                pass
             j["status"] = "completed"
             j["completed_at"] = _utc_now().isoformat()
             state.save_state(cfg, st)
