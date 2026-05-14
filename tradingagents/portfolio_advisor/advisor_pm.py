@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import subprocess
+import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -511,6 +514,7 @@ def execute_pending_approval(cfg: Dict[str, Any]) -> str:
                     had_replan=bool(pending.get("request_replan")),
                     description="Queued: " + ", ".join(tickers_queued),
                 )
+                _trigger_run_due_async()
                 parts.append(f"Queued: {', '.join(tickers_queued)}")
             if skipped:
                 parts.append(f"Skipped (not in book): {', '.join(skipped)}")
@@ -591,7 +595,32 @@ def apply_pm_cycle_followups(cfg: Dict[str, Any], result: AdvisorPMCycleResult) 
             had_replan=bool(actions.get("replan_outcome")),
             description="Queued: " + ", ".join(r["ticker"] for r in new_rows),
         )
+        _trigger_run_due_async()
     return actions
+
+
+def _trigger_run_due_async() -> None:
+    """Launch run-due in a background subprocess so queued jobs start immediately."""
+    try:
+        root = Path(__file__).resolve().parent.parent.parent
+        env = os.environ.copy()
+        env_file = root / ".env"
+        if env_file.is_file():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, v = line.partition("=")
+                    env.setdefault(k.strip(), v.strip())
+        env["PYTHONPATH"] = str(root) + ((":" + env["PYTHONPATH"]) if env.get("PYTHONPATH") else "")
+        subprocess.Popen(
+            [sys.executable, "-m", "cli.main", "advisor", "portfolio", "run-due"],
+            cwd=str(root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+    except Exception as e:
+        logger.debug("_trigger_run_due_async failed: %s", e)
 
 
 def _notify_action_stances(cfg: Dict[str, Any], result: AdvisorPMCycleResult) -> None:
