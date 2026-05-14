@@ -179,12 +179,20 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Weekly ``advisor portfolio weekly`` = lightweight check only (no full replan).
     "portfolio_advisor_weekly_llm": False,
     "portfolio_advisor_weekly_always_email": False,
+    # Send an ntfy notification after every single-model analysis job (thesis_check etc.).
+    # False = results are written to the message log and dashboard only; no ntfy push.
+    "portfolio_advisor_single_model_notify": False,
     # Portfolio advisor planner (scheduling) uses ``llm_provider`` + this model.
     # None = fall back to ``quick_think_llm`` (cheap path for routine scheduling).
     "portfolio_advisor_planner_model": None,
     # Stronger model for: post-earnings verdict CLI, and optional advisor digest when
-    # a CRITICAL rule fires. OpenRouter slug recommended, e.g. deepseek/deepseek-r1.
-    "portfolio_advisor_reasoning_model": "deepseek/deepseek-r1",
+    # a CRITICAL rule fires. OpenRouter slug recommended.
+    # V4 Pro for PM/memory-review (synthesis, not fresh reasoning); R1 kept in
+    # single_model_analysis via portfolio_advisor_single_model_reasoning_model below.
+    "portfolio_advisor_reasoning_model": "deepseek/deepseek-v4-pro",
+    # Model used specifically for single_model_analysis jobs (fresh per-ticker reasoning
+    # where R1's chain-of-thought earns its cost). Falls back to reasoning_model if unset.
+    "portfolio_advisor_single_model_reasoning_model": "deepseek/deepseek-r1",
     # When True, ``advisor portfolio replan`` skips the planner LLM if live tickers and
     # the catalyst digest match the last successful plan (saves cost; pending jobs unchanged).
     "portfolio_advisor_skip_replan_llm_when_unchanged": False,

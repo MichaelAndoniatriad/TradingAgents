@@ -172,7 +172,11 @@ def _build_prompt(
 
 
 def _reasoning_llm(cfg: Dict[str, Any]):
-    model = (cfg.get("portfolio_advisor_reasoning_model") or "deepseek/deepseek-r1").strip()
+    model = (
+        cfg.get("portfolio_advisor_single_model_reasoning_model")
+        or cfg.get("portfolio_advisor_reasoning_model")
+        or "deepseek/deepseek-r1"
+    ).strip()
     provider = (cfg.get("llm_provider") or "openrouter").lower()
     if "/" in model and provider != "openrouter":
         provider = "openrouter"
@@ -217,8 +221,9 @@ def run_single_model_analysis(
                 parts.append(block.get("text", ""))
         content = "\n".join(parts) if parts else str(content)
     text = str(content).strip()
-    subj = f"[TradingAgents] Advisor single model run {sym} {jt} {today}"
-    messaging.send_advisor_message(cfg, subj, text[:12000])
+    if bool(cfg.get("portfolio_advisor_single_model_notify", False)):
+        subj = f"[TradingAgents] Advisor single model run {sym} {jt} {today}"
+        messaging.send_advisor_message(cfg, subj, text[:12000])
     append_event(
         cfg,
         {
