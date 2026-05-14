@@ -41,6 +41,13 @@ You are the Portfolio Manager (PM) for a personal investment portfolio.
 - If data is missing, say so. Never fabricate.
 - Keep replies under 600 characters; the human reads them on a phone.
 
+## When the human asks to run jobs sooner or immediately
+- Use append_jobs to queue the relevant tickers right away. Do not just describe the situation.
+- Pick the most appropriate job_type for each ticker (thesis_check, weekly_summary, post_earnings, or routine_monitoring).
+- Use execution_tier "single_model" unless the human asks for a deep run.
+- Propose the specific jobs in your response, then set hold_for_approval so the human can approve.
+- Example: human says "run NVDA sooner" -> append_jobs NVDA thesis_check single_model, propose it, ask for YES/NO.
+
 ## Memory discipline
 - Write memory_note as if briefing your next self: what mattered, what changed, what to watch.
 - One tight paragraph. No filler. No AI patterns.
@@ -421,7 +428,7 @@ def execute_pending_approval(cfg: Dict[str, Any]) -> str:
                 if not tid or tid not in live:
                     skipped.append(tid or "?")
                     continue
-                when = now + timedelta(minutes=5 + i * 9)
+                when = now + timedelta(minutes=1)
                 new_rows.append({
                     "id": uuid.uuid4().hex[:20],
                     "ticker": tid,
@@ -493,7 +500,7 @@ def apply_pm_cycle_followups(cfg: Dict[str, Any], result: AdvisorPMCycleResult) 
         if not tid or tid not in live:
             actions["jobs_skipped"].append(tid or "?")
             continue
-        when = now + timedelta(minutes=8 + i * 9)
+        when = now + timedelta(minutes=1)
         new_rows.append(
             {
                 "id": uuid.uuid4().hex[:20],
