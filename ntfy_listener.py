@@ -601,10 +601,10 @@ def main() -> None:
                 if msg_event != "message":
                     continue
 
-                # Skip our own outgoing messages (tracked by ID or title)
+                # Skip our own outgoing messages (tracked by ID or by known system titles)
                 if msg_id in _SENT_IDS:
                     continue
-                if (msg.get("title") or "").strip() == "PM":
+                if (msg.get("title") or "").strip() in ("PM", "TradingAgents"):
                     continue
 
                 text = (msg.get("message") or "").strip()

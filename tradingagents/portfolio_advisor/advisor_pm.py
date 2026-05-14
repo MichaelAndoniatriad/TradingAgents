@@ -594,6 +594,20 @@ def apply_pm_cycle_followups(cfg: Dict[str, Any], result: AdvisorPMCycleResult) 
     return actions
 
 
+def _notify_action_stances(cfg: Dict[str, Any], result: AdvisorPMCycleResult) -> None:
+    """Push a short ntfy alert if PM has sell or trim stances. Silent on error."""
+    try:
+        action = [s for s in (result.stances or []) if s.stance in ("sell", "trim")]
+        if not action:
+            return
+        from tradingagents.portfolio_advisor import messaging
+        lines = [f"{s.ticker} {s.stance.upper()}: {(s.rationale or '').strip()[:120]}" for s in action]
+        body = "Action required:\n" + "\n".join(lines)
+        messaging.send_advisor_message(cfg, "Action required", body)
+    except Exception as e:
+        logger.debug("_notify_action_stances failed silently: %s", e)
+
+
 def run_pm_cycle(
     cfg: Dict[str, Any],
     *,
@@ -711,6 +725,10 @@ Deliver structured output only. Stances must use tickers you see above. forward_
         actions_taken = {"apply_enabled": False, "held_for_approval": True}
     else:
         actions_taken = apply_pm_cycle_followups(cfg, result)
+
+    # Proactive alert for action stances on automated cycles (ntfy questions already surface stances in the reply)
+    if trigger_s not in ("ntfy_question",):
+        _notify_action_stances(cfg, result)
 
     ts = datetime.now(timezone.utc).isoformat()
     row = {
