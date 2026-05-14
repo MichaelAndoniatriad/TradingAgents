@@ -13,6 +13,7 @@ Supported commands (sent as plain message text in the ntfy app):
 
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import os
@@ -45,14 +46,13 @@ REQUEST_TIMEOUT = 15  # seconds
 LOG_DIR = Path.home() / ".tradingagents" / "logs"
 LOG_FILE = LOG_DIR / "ntfy_listener.log"
 
-# Marker used to identify our own outgoing messages so we don't echo them
-# back to ourselves.  ntfy tags the server-sent messages with a "upstream"
-# field only when using its cloud relay; polling messages don't include it.
-# We instead store the last N message IDs we sent and skip those.
+# Track IDs of our own outgoing messages to avoid echo-processing them.
+# deque enforces the bound automatically; the set gives O(1) membership tests.
 _SENT_IDS: set[str] = set()
+_SENT_IDS_QUEUE: collections.deque[str] = collections.deque(maxlen=500)
 
 # ---------------------------------------------------------------------------
-# Logging
+# Logging — initialised inside main() to avoid side effects on import
 # ---------------------------------------------------------------------------
 
 def _setup_logging() -> logging.Logger:
@@ -60,18 +60,16 @@ def _setup_logging() -> logging.Logger:
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%S")
     logger = logging.getLogger("ntfy_listener")
     logger.setLevel(logging.DEBUG)
-    # File handler
     fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
     fh.setFormatter(fmt)
     logger.addHandler(fh)
-    # Stdout handler
     sh = logging.StreamHandler(sys.stdout)
     sh.setFormatter(fmt)
     logger.addHandler(sh)
     return logger
 
 
-log = _setup_logging()
+log = logging.getLogger("ntfy_listener")
 
 # ---------------------------------------------------------------------------
 # ntfy helpers
@@ -93,12 +91,12 @@ def _ntfy_publish(topic: str, message: str, title: str = "TradingAgents") -> Non
         )
         resp.raise_for_status()
         data = resp.json()
-        # Track the ID of our own outgoing message so we don't process it
         if isinstance(data, dict) and data.get("id"):
-            _SENT_IDS.add(data["id"])
-            # Keep the set bounded
-            if len(_SENT_IDS) > 500:
-                _SENT_IDS.discard(next(iter(_SENT_IDS)))
+            msg_id = data["id"]
+            if len(_SENT_IDS_QUEUE) == _SENT_IDS_QUEUE.maxlen:
+                _SENT_IDS.discard(_SENT_IDS_QUEUE[0])
+            _SENT_IDS_QUEUE.append(msg_id)
+            _SENT_IDS.add(msg_id)
         log.info("SENT reply (%d chars)", len(message))
     except Exception as exc:  # noqa: BLE001
         log.error("Failed to publish ntfy reply: %s", exc)
@@ -201,11 +199,9 @@ def _cmd_portfolio() -> str:
 
     lines: list[str] = [f"Recent reports ({len(reports)}):"]
     for rpt in reports:
-        # Path is typically: logs/TICKER/DATE/reports/complete_report.md
-        parts = rpt.parts
-        # Extract ticker + date from path components
         try:
-            mtime = datetime.fromtimestamp(rpt.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            st = rpt.stat()
+            mtime = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
             # Try to extract a "final decision" headline from the report
             text = rpt.read_text(encoding="utf-8", errors="replace")
             decision_snippet = _extract_decision(text)
@@ -220,17 +216,18 @@ def _cmd_portfolio() -> str:
     return "\n".join(lines)
 
 
+_DECISION_MARKERS = (
+    "## V. Portfolio Manager Decision",
+    "## Portfolio Management Decision",
+)
+
+
 def _extract_decision(text: str) -> str:
     """Pull a short decision snippet from a complete_report.md."""
-    # Look for the Portfolio Manager Decision section heading and grab a snippet
-    marker = "## V. Portfolio Manager Decision"
-    idx = text.find(marker)
-    if idx == -1:
-        # Fallback: look for "final_trade_decision" style heading
-        marker = "## Portfolio Management Decision"
-        idx = text.find(marker)
-    if idx == -1:
+    marker = next((m for m in _DECISION_MARKERS if m in text), None)
+    if marker is None:
         return ""
+    idx = text.find(marker)
     snippet = text[idx + len(marker):idx + len(marker) + 300].strip()
     # First non-empty line after the heading
     for line in snippet.splitlines():
@@ -319,6 +316,7 @@ def _dispatch(text: str, topic: str) -> str:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    _setup_logging()
     if not NTFY_TOPIC:
         log.error(
             "NTFY_TOPIC environment variable is not set. "
