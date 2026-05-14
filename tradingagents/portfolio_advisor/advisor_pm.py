@@ -45,8 +45,8 @@ You are the Portfolio Manager (PM) for a personal investment portfolio.
 - Use append_jobs to queue the relevant tickers right away. Do not just describe the situation.
 - Pick the most appropriate job_type for each ticker (thesis_check, weekly_summary, post_earnings, or routine_monitoring).
 - Use execution_tier "single_model" unless the human asks for a deep run.
-- Propose the specific jobs in your response, then set hold_for_approval so the human can approve.
-- Example: human says "run NVDA sooner" -> append_jobs NVDA thesis_check single_model, propose it, ask for YES/NO.
+- Execute immediately — no approval needed. Tell the human what you queued. They can reply CANCEL to undo.
+- Example: human says "run NVDA sooner" -> append_jobs NVDA thesis_check single_model, notify "Queued NVDA thesis_check. Reply CANCEL to undo."
 
 ## Memory discipline
 - Write memory_note as if briefing your next self: what mattered, what changed, what to watch.
@@ -397,6 +397,66 @@ def format_approval_prompt(result: AdvisorPMCycleResult) -> str:
     return "Proposed actions:\n" + "\n".join(f"  {l}" for l in lines) + "\n\nReply YES to approve or NO to skip."
 
 
+# ---------------------------------------------------------------------------
+# Last-action log — lets the user CANCEL the most recent PM-queued jobs
+# ---------------------------------------------------------------------------
+
+def _last_action_path(cfg: Dict[str, Any]) -> Path:
+    return state.advisor_dir(cfg) / "last_action.json"
+
+
+def save_last_action(
+    cfg: Dict[str, Any],
+    job_ids: List[str],
+    had_replan: bool = False,
+    description: str = "",
+) -> None:
+    p = _last_action_path(cfg)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        json.dumps(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "job_ids": job_ids,
+                "had_replan": had_replan,
+                "description": description,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def cancel_last_action(cfg: Dict[str, Any]) -> str:
+    """Cancel jobs queued by the last PM action. Returns a status string."""
+    p = _last_action_path(cfg)
+    if not p.is_file():
+        return "No recent action to cancel."
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "Could not read last action."
+    job_ids = set(data.get("job_ids") or [])
+    if not job_ids:
+        return "No jobs recorded in last action."
+    st = state.load_state(cfg)
+    cancelled: List[str] = []
+    for j in st.get("jobs") or []:
+        if j.get("id") in job_ids and j.get("status") == "pending":
+            j["status"] = "cancelled"
+            j["cancel_reason"] = "Cancelled by user via ntfy"
+            cancelled.append(j.get("ticker", "?"))
+    state.save_state(cfg, st)
+    try:
+        p.unlink(missing_ok=True)
+    except OSError:
+        pass
+    if cancelled:
+        note = " (replan cannot be undone)" if data.get("had_replan") else ""
+        return f"Cancelled: {', '.join(cancelled)}{note}"
+    return "Jobs already ran or were not found in queue."
+
+
 def execute_pending_approval(cfg: Dict[str, Any]) -> str:
     """Execute whatever is in pending_approval.json. Returns a status string."""
     pending = load_pending_approval(cfg)
@@ -445,6 +505,12 @@ def execute_pending_approval(cfg: Dict[str, Any]) -> str:
                 state.append_jobs(st, new_rows)
                 state.save_state(cfg, st)
                 tickers_queued = [r["ticker"] for r in new_rows]
+                save_last_action(
+                    cfg,
+                    job_ids=[r["id"] for r in new_rows],
+                    had_replan=bool(pending.get("request_replan")),
+                    description="Queued: " + ", ".join(tickers_queued),
+                )
                 parts.append(f"Queued: {', '.join(tickers_queued)}")
             if skipped:
                 parts.append(f"Skipped (not in book): {', '.join(skipped)}")
@@ -519,6 +585,12 @@ def apply_pm_cycle_followups(cfg: Dict[str, Any], result: AdvisorPMCycleResult) 
         state.append_jobs(st, new_rows)
         state.save_state(cfg, st)
         actions["jobs_appended"] = len(new_rows)
+        save_last_action(
+            cfg,
+            job_ids=[r["id"] for r in new_rows],
+            had_replan=bool(actions.get("replan_outcome")),
+            description="Queued: " + ", ".join(r["ticker"] for r in new_rows),
+        )
     return actions
 
 

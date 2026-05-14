@@ -184,7 +184,7 @@ def _cmd_help() -> str:
         "  /status         — pending advisor jobs + last replan date\n"
         "  /portfolio      — recent analysis signal summary\n"
         "  /ask <question> — ask the Portfolio Manager anything (or just send plain text)\n"
-        "  yes / no        — approve or discard PM's proposed actions\n"
+        "  cancel          — undo the last PM action (cancels queued jobs)\n"
         "  /help           — this message"
     )
 
@@ -318,7 +318,7 @@ def _cmd_ask(question: str, topic: str) -> str:
         f"try:\n"
         f"    import tradingagents\n"
         f"    from ui.user_config import merged_app_config\n"
-        f"    from tradingagents.portfolio_advisor.advisor_pm import run_pm_cycle, format_approval_prompt\n"
+        f"    from tradingagents.portfolio_advisor.advisor_pm import run_pm_cycle\n"
         f"    from pathlib import Path\n"
         f"    cfg = merged_app_config()\n"
         f"    _chat_path = Path.home() / '.tradingagents' / 'portfolio_advisor' / 'ntfy_chat_history.jsonl'\n"
@@ -333,7 +333,7 @@ def _cmd_ask(question: str, topic: str) -> str:
         f"        _parts = [f\"[{{e['ts']}}] {{'You' if e['role']=='user' else 'PM'}}: {{e['text']}}\" for e in _entries[-10:]]\n"
         f"        if _parts: _chat_ctx = 'Recent conversation:\\n' + '\\n'.join(_parts)\n"
         f"    _full_ctx = (_chat_ctx + '\\n\\nCurrent question: ' + {q_repr}).strip() if _chat_ctx else {q_repr}\n"
-        f"    result = run_pm_cycle(cfg, trigger='ntfy_question', extra_context=_full_ctx, hold_for_approval=True)\n"
+        f"    result = run_pm_cycle(cfg, trigger='ntfy_question', extra_context=_full_ctx, hold_for_approval=False)\n"
         f"    summary = (result.executive_summary or '').strip()\n"
         f"    if len(summary) > 500:\n"
         f"        summary = summary[:497] + '...'\n"
@@ -348,10 +348,9 @@ def _cmd_ask(question: str, topic: str) -> str:
         f"            st = str(s.get('stance') or '?')\n"
         f"            ra = str(s.get('rationale') or '')[:100]\n"
         f"            parts.append(f'{{tk}} {{st}}: {{ra}}')\n"
-        f"    approval = format_approval_prompt(result)\n"
-        f"    if approval:\n"
+        f"    if result.append_jobs or result.request_replan:\n"
         f"        parts.append('')\n"
-        f"        parts.append(approval)\n"
+        f"        parts.append('Reply CANCEL to undo.')\n"
         f"    post('\\n'.join(parts), title='PM')\n"
         f"except Exception as exc:\n"
         f"    post(f'PM error: {{exc}}', title='PM')\n"
@@ -441,6 +440,47 @@ def _cmd_no() -> str:
     return "Actions discarded."
 
 
+def _cmd_cancel(topic: str) -> str:
+    """Cancel the jobs queued by the last PM action."""
+    python = sys.executable
+    root_repr = repr(str(_PROJECT_ROOT))
+    topic_repr = repr(topic)
+    inline = (
+        f"import sys, os\n"
+        f"from pathlib import Path\n"
+        f"try:\n"
+        f"    from dotenv import load_dotenv\n"
+        f"    load_dotenv(Path({root_repr}) / '.env', override=False)\n"
+        f"except Exception:\n"
+        f"    pass\n"
+        f"sys.path.insert(0, {root_repr})\n"
+        f"import requests\n"
+        f"topic = os.environ.get('NTFY_TOPIC', {topic_repr})\n"
+        f"base = os.environ.get('NTFY_BASE_URL', 'https://ntfy.sh')\n"
+        f"def post(msg, title='PM'):\n"
+        f"    requests.post(f'{{base}}/{{topic}}', data=msg.encode('utf-8'),\n"
+        f"        headers={{'Title': title, 'Content-Type': 'text/plain; charset=utf-8'}}, timeout=30)\n"
+        f"try:\n"
+        f"    from ui.user_config import merged_app_config\n"
+        f"    from tradingagents.portfolio_advisor.advisor_pm import cancel_last_action\n"
+        f"    cfg = merged_app_config()\n"
+        f"    result = cancel_last_action(cfg)\n"
+        f"    post(result, title='PM')\n"
+        f"except Exception as exc:\n"
+        f"    post(f'Cancel error: {{exc}}', title='PM')\n"
+    )
+    try:
+        subprocess.Popen(
+            [python, "-c", inline],
+            cwd=str(_PROJECT_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return ""
+    except Exception as exc:
+        return f"Failed to launch cancel subprocess: {exc}"
+
+
 def _cmd_analyze(ticker: str, topic: str) -> str:
     """Trigger a one-off advisor run-due for the given ticker.
 
@@ -500,6 +540,9 @@ def _dispatch(text: str, topic: str) -> str:
 
     if lower == "/portfolio":
         return _cmd_portfolio()
+
+    if lower in ("cancel", "/cancel"):
+        return _cmd_cancel(topic)
 
     if lower in ("yes", "y", "/yes"):
         return _cmd_yes(topic)
