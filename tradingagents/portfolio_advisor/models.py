@@ -121,3 +121,11 @@ class AdvisorPMCycleResult(BaseModel):
             "live export; unknown symbols are skipped."
         ),
     )
+    push_note: str = Field(
+        default="",
+        description=(
+            "A short observation worth pushing to the human right now — deadline approaching, "
+            "unexpected data point, stance change, catalyst in next 48h. Max 280 chars. "
+            "Leave empty if nothing urgent or new. Do not repeat what was already said this cycle."
+        ),
+    )

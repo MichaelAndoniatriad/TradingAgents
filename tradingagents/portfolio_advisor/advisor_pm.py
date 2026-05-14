@@ -700,6 +700,9 @@ Structured output fields (use defaults when unsure):
 - append_jobs: up to five extra pending jobs to queue without relying on the planner (use live tickers only).
   Each entry: ticker, execution_tier single_model or full_graph, job_type thesis_check|weekly_summary|post_earnings|routine_monitoring, rationale.
   If you set request_replan true, you may still append_jobs; they are added after the replan finishes.
+- push_note: one short observation worth pushing to the human right now — deadline approaching, unexpected finding,
+  stance change, catalyst within 48h. Max 280 chars. Leave empty if nothing urgent or new. This goes straight
+  to the human's phone, so only fill it when you genuinely have something they need to know unprompted.
 
 Deliver structured output only. Stances must use tickers you see above. forward_tasks should be concrete
 (research X, schedule replan, verify Y thesis, respond to risk flag, etc.). memory_note is what you want your next self to read first.
@@ -737,6 +740,15 @@ Deliver structured output only. Stances must use tickers you see above. forward_
     # Proactive alert for action stances on automated cycles (ntfy questions already surface stances in the reply)
     if trigger_s not in ("ntfy_question",):
         _notify_action_stances(cfg, result)
+
+    # Push note — PM-initiated observation, any trigger
+    note = (result.push_note or "").strip()
+    if note:
+        try:
+            from tradingagents.portfolio_advisor import messaging
+            messaging.send_advisor_message(cfg, "PM", note[:280])
+        except Exception as e:
+            logger.debug("push_note send failed: %s", e)
 
     ts = datetime.now(timezone.utc).isoformat()
     row = {
