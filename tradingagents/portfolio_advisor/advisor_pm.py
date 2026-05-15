@@ -1212,8 +1212,8 @@ def _trigger_run_due_async() -> None:
         logger.warning("Failed to trigger async run-due: %s", e)
 
 
-def _notify_action_stances(cfg: Dict[str, Any], result: AdvisorPMCycleResult, portfolio_rows: List[Dict[str, Any]]) -> None:
-    """Update action log from PM stances; push alert for new/changed sell/trim. Silent on error."""
+def _notify_action_stances(cfg: Dict[str, Any], result: AdvisorPMCycleResult, portfolio_rows: List[Dict[str, Any]]) -> bool:
+    """Update action log from PM stances; push one consolidated alert when needed."""
     try:
         from tradingagents.portfolio_advisor import messaging
         from tradingagents.portfolio_advisor.action_log import upsert_action, mark_done
@@ -1223,7 +1223,7 @@ def _notify_action_stances(cfg: Dict[str, Any], result: AdvisorPMCycleResult, po
             if s.stance not in ("sell", "trim"):
                 mark_done(cfg, s.ticker)
         if not action_stances:
-            return
+            return False
         lines = []
         for s in action_stances:
             rationale = (s.rationale or "").strip()
@@ -1235,11 +1235,17 @@ def _notify_action_stances(cfg: Dict[str, Any], result: AdvisorPMCycleResult, po
                 f"{s.ticker} {s.stance.upper()}: {instruction}\nReason: {rationale[:180]}"
             )
         if not lines:
-            return
-        body = "Action required:\n" + "\n".join(lines)
+            return False
+        note = (result.push_note or "").strip()
+        body_parts = ["Action required:", *lines]
+        if note:
+            body_parts.extend(["", f"PM note: {note[:280]}"])
+        body = "\n".join(body_parts)
         messaging.send_advisor_message(cfg, "Action required", body)
+        return True
     except Exception as e:
         logger.debug("_notify_action_stances failed silently: %s", e)
+        return False
 
 
 def run_pm_cycle(
@@ -1417,12 +1423,13 @@ the trigger, say that plainly and use append_jobs to send a new research layer t
         actions_taken = apply_pm_cycle_followups(cfg, result)
 
     # Proactive alert for action stances on automated cycles (ntfy questions already surface stances in the reply)
+    action_alert_sent = False
     if trigger_s not in ("ntfy_question",):
-        _notify_action_stances(cfg, result, portfolio_rows)
+        action_alert_sent = _notify_action_stances(cfg, result, portfolio_rows)
 
-    # Push note — PM-initiated observation, any trigger
+    # Push note — only when it is not already included in the consolidated action alert.
     note = (result.push_note or "").strip()
-    if note:
+    if note and not action_alert_sent:
         try:
             from tradingagents.portfolio_advisor import messaging
             messaging.send_advisor_message(cfg, "PM", note[:280])

@@ -106,12 +106,56 @@ def test_notify_action_stances_suppresses_unchanged_repeats(tmp_path):
     ]
 
     with patch("tradingagents.portfolio_advisor.messaging.send_advisor_message") as send:
-        _notify_action_stances(cfg, res, rows)
-        _notify_action_stances(cfg, res, rows)
+        first = _notify_action_stances(cfg, res, rows)
+        second = _notify_action_stances(cfg, res, rows)
 
+    assert first is True
+    assert second is False
     assert send.call_count == 1
     body = send.call_args[0][2]
     assert "Close 1 TEAM position(s)" in body
+
+
+def test_run_pm_cycle_combines_action_alert_and_push_note(tmp_path):
+    cfg = {"portfolio_advisor_dir": str(tmp_path / "pa"), "event_log_path": str(tmp_path / "events.jsonl")}
+    event_log = tmp_path / "events.jsonl"
+    event_log.write_text(
+        (
+            '{"timestamp":"2026-05-15T09:00:00+00:00","ticker":"TEAM",'
+            '"event_type":"full_graph_decision","key_data":{"rating":"Sell",'
+            '"summary":"Sell TEAM."},"outcome":null}\n'
+        ),
+        encoding="utf-8",
+    )
+    fake = AdvisorPMCycleResult(
+        executive_summary="memo",
+        stances=[
+            AdvisorPMTickerStance(
+                ticker="TEAM",
+                stance="sell",
+                rationale="Sell based on latest full graph.",
+                evidence_refs=["event:full_graph_decision:TEAM:2026-05-15"],
+            )
+        ],
+        push_note="Do not send this as a separate PM message.",
+    )
+    m_struct = MagicMock()
+    m_struct.invoke.return_value = fake
+    m_llm = MagicMock()
+    m_client = MagicMock()
+    m_client.get_llm.return_value = m_llm
+    rows = [{"symbolFull": "TEAM", "positionId": 1, "openRate": 100, "units": 2, "unitsBaseValueDollars": 180}]
+
+    with patch("tradingagents.portfolio_advisor.advisor_pm.etoro_scan.fetch_portfolio_rows") as fetch:
+        fetch.return_value = ({}, "portfolio text here", ["TEAM"], rows)
+        with patch("tradingagents.portfolio_advisor.advisor_pm.create_llm_client", return_value=m_client):
+            with patch("tradingagents.portfolio_advisor.advisor_pm.bind_structured", return_value=m_struct):
+                with patch("tradingagents.portfolio_advisor.messaging.send_advisor_message") as send:
+                    run_pm_cycle(cfg, trigger="test_trigger")
+
+    assert send.call_count == 1
+    assert send.call_args[0][1] == "Action required"
+    assert "PM note:" in send.call_args[0][2]
 
 
 def test_run_pm_cycle_prompt_includes_latest_research(tmp_path):
