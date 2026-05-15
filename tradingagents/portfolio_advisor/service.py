@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from tradingagents.agents.utils.event_log import append_event
 from tradingagents.clerk.deep_runner import run_deep_research, save_deep_report
@@ -283,92 +285,136 @@ def run_replan(cfg: Dict[str, Any], *, ignore_weekday: bool = False) -> str:
     return "replanned"
 
 
-def run_due_jobs(cfg: Dict[str, Any]) -> int:
-    """Execute pending jobs whose time has passed (cap per invocation)."""
-    set_config(cfg)
-    max_run = int(cfg.get("portfolio_advisor_run_due_max") or 2)
-    try:
-        _p, _t, live_tickers, rows = etoro_scan.fetch_portfolio_rows()
-        live = etoro_scan.current_ticker_set(live_tickers)
-        # auto_close_outcomes loads and saves state for unit snapshots internally.
-        outcome_sync.auto_close_outcomes(cfg, live, rows=rows)
-    except Exception as e:
-        logger.error("run_due: cannot fetch portfolio: %s", e)
-        return 0
+_state_lock = threading.Lock()
 
-    st = state.load_state(cfg)
-    pending = [j for j in state.list_pending_jobs(st)]
-    now = _utc_now()
-    due: List[Dict[str, Any]] = []
-    for j in pending:
-        try:
-            if _parse_iso(str(j.get("scheduled_at") or "")) <= now:
-                due.append(j)
-        except ValueError:
-            continue
-    due.sort(key=lambda x: str(x.get("scheduled_at") or ""))
 
-    ran = 0
-    for j in due:
-        if ran >= max_run:
-            break
-        tid = str(j.get("ticker") or "").strip().upper()
-        jid = str(j.get("id") or "")
-        if not tid or not jid:
-            continue
-        if tid not in live:
-            state.cancel_job(st, jid, reason="no longer in eToro portfolio")
-            state.save_state(cfg, st)
-            messaging.send_advisor_message(cfg, f"{tid} removed from queue", "Not in current portfolio.")
-            ran += 1
-            continue
-        trade_date = date.today().isoformat()
-        analysts = cfg.get("portfolio_advisor_deep_analysts") or ["news", "fundamentals", "market"]
-        if not isinstance(analysts, list):
-            analysts = ["news", "fundamentals", "market"]
-        tier = str(j.get("execution_tier") or "single_model").strip().lower()
-        job_type = str(j.get("job_type") or "routine_monitoring").strip()
-        try:
-            if tier == "full_graph":
-                final_state, _signal = run_deep_research(tid, trade_date, analysts, cfg)
-                rd = Path(str(cfg.get("results_dir", ".")))
-                save_deep_report(
-                    results_dir=rd, ticker=tid, trade_date=trade_date, final_state=final_state
-                )
-                j["status"] = "completed"
+def _save_job_outcome(cfg: Dict[str, Any], jid: str, status: str, error: Optional[str] = None) -> None:
+    """Thread-safe update of a single job's status in state.json."""
+    with _state_lock:
+        st = state.load_state(cfg)
+        for j in st.get("jobs", []):
+            if j.get("id") == jid:
+                j["status"] = status
                 j["completed_at"] = _utc_now().isoformat()
-                state.save_state(cfg, st)
-                ran += 1
-                dec = str(final_state.get("final_trade_decision") or "")
-                messaging.send_advisor_message(
-                    cfg,
-                    f"{tid} deep research done",
-                    messaging.ntfy_verdict(dec, tid),
-                )
-                try:
-                    from tradingagents.portfolio_advisor.action_log import ingest_from_analysis
-                    ingest_from_analysis(cfg, tid, dec, source="full_graph")
-                except Exception:
-                    pass
-                continue
+                if error:
+                    j["error"] = error
+                break
+        state.save_state(cfg, st)
+
+
+def _run_job(j: Dict[str, Any], cfg: Dict[str, Any], live: set, trade_date: str) -> Dict[str, Any]:
+    """Execute one job. Returns result dict. Sends its own ntfy message when done."""
+    tid = str(j.get("ticker") or "").strip().upper()
+    jid = str(j.get("id") or "")
+
+    if not tid or not jid:
+        return {"ticker": tid, "status": "skipped", "verdict": ""}
+
+    if tid not in live:
+        _save_job_outcome(cfg, jid, "cancelled")
+        messaging.send_advisor_message(cfg, tid, "Removed — no longer in portfolio.")
+        return {"ticker": tid, "status": "cancelled", "verdict": ""}
+
+    analysts = cfg.get("portfolio_advisor_deep_analysts") or ["news", "fundamentals", "market"]
+    if not isinstance(analysts, list):
+        analysts = ["news", "fundamentals", "market"]
+    tier = str(j.get("execution_tier") or "single_model").strip().lower()
+    job_type = str(j.get("job_type") or "routine_monitoring").strip()
+
+    try:
+        if tier == "full_graph":
+            final_state, _signal = run_deep_research(tid, trade_date, analysts, cfg)
+            rd = Path(str(cfg.get("results_dir", ".")))
+            save_deep_report(results_dir=rd, ticker=tid, trade_date=trade_date, final_state=final_state)
+            dec = str(final_state.get("final_trade_decision") or "")
+            try:
+                from tradingagents.portfolio_advisor.action_log import ingest_from_analysis
+                ingest_from_analysis(cfg, tid, dec, source="full_graph")
+            except Exception:
+                pass
+            _save_job_outcome(cfg, jid, "completed")
+            verdict = messaging.ntfy_verdict(dec, tid)
+            messaging.send_advisor_message(cfg, tid, verdict)
+            return {"ticker": tid, "status": "completed", "verdict": verdict}
+        else:
             analysis_text = run_single_model_analysis(cfg, tid, job_type)
             try:
                 from tradingagents.portfolio_advisor.action_log import ingest_from_analysis
                 ingest_from_analysis(cfg, tid, analysis_text or "", source=f"single_model_{job_type}")
             except Exception:
                 pass
-            j["status"] = "completed"
-            j["completed_at"] = _utc_now().isoformat()
-            state.save_state(cfg, st)
-            ran += 1
-        except Exception as e:
-            logger.exception("deep research failed for %s: %s", tid, e)
-            j["status"] = "failed"
-            j["error"] = str(e)
-            state.save_state(cfg, st)
-            messaging.send_advisor_message(cfg, f"{tid} run failed", str(e)[:200])
-            ran += 1
-    return ran
+            _save_job_outcome(cfg, jid, "completed")
+            verdict = messaging.ntfy_verdict(analysis_text or "", tid)
+            messaging.send_advisor_message(cfg, tid, verdict)
+            return {"ticker": tid, "status": "completed", "verdict": verdict}
+    except Exception as e:
+        logger.exception("job failed for %s: %s", tid, e)
+        _save_job_outcome(cfg, jid, "failed", str(e))
+        messaging.send_advisor_message(cfg, f"{tid} failed", str(e)[:150])
+        return {"ticker": tid, "status": "failed", "verdict": ""}
+
+
+def _post_batch_pm_brief(cfg: Dict[str, Any], results: List[Dict[str, Any]]) -> None:
+    """After all jobs finish, run one PM cycle and send a consolidated brief."""
+    try:
+        from tradingagents.portfolio_advisor.advisor_pm import run_pm_cycle
+        verdicts = "\n".join(f"{r['ticker']}: {r['verdict']}" for r in results if r.get("verdict"))
+        context = f"Research batch just completed. Individual results:\n{verdicts}\n\nBrief each ticker: one line, verdict first."
+        result = run_pm_cycle(cfg, trigger="batch_complete", extra_context=context, hold_for_approval=False)
+        if result.stances:
+            lines = []
+            for s in result.stances:
+                action = s.stance.upper()
+                rat = (s.rationale or "").split(".")[0].strip()[:60]
+                lines.append(f"{s.ticker} {action}" + (f" — {rat}" if rat else ""))
+            messaging.send_advisor_message(cfg, "PM Brief", "\n".join(lines))
+    except Exception as e:
+        logger.warning("post-batch PM brief failed: %s", e)
+
+
+def run_due_jobs(cfg: Dict[str, Any]) -> int:
+    """Execute all due jobs in parallel, then send a PM brief when done."""
+    set_config(cfg)
+    max_run = int(cfg.get("portfolio_advisor_run_due_max") or 8)
+    try:
+        _p, _t, live_tickers, rows = etoro_scan.fetch_portfolio_rows()
+        live = etoro_scan.current_ticker_set(live_tickers)
+        outcome_sync.auto_close_outcomes(cfg, live, rows=rows)
+    except Exception as e:
+        logger.error("run_due: cannot fetch portfolio: %s", e)
+        return 0
+
+    st = state.load_state(cfg)
+    now = _utc_now()
+    due: List[Dict[str, Any]] = []
+    for j in state.list_pending_jobs(st):
+        try:
+            if _parse_iso(str(j.get("scheduled_at") or "")) <= now:
+                due.append(j)
+        except ValueError:
+            continue
+    due.sort(key=lambda x: str(x.get("scheduled_at") or ""))
+    due = due[:max_run]
+
+    if not due:
+        return 0
+
+    trade_date = date.today().isoformat()
+    job_results: List[Dict[str, Any]] = []
+
+    with ThreadPoolExecutor(max_workers=len(due)) as pool:
+        futures = {pool.submit(_run_job, j, cfg, live, trade_date): j for j in due}
+        for future in as_completed(futures):
+            try:
+                job_results.append(future.result())
+            except Exception as e:
+                logger.exception("job worker raised: %s", e)
+
+    completed = [r for r in job_results if r["status"] == "completed" and r.get("verdict")]
+    if completed:
+        _post_batch_pm_brief(cfg, completed)
+
+    return len([r for r in job_results if r["status"] in ("completed", "cancelled")])
 
 
 def run_bootstrap(

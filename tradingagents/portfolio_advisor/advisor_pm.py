@@ -245,7 +245,7 @@ def _pm_model(cfg: Dict[str, Any]) -> str:
     raw = cfg.get("portfolio_advisor_pm_model")
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
-    return (cfg.get("portfolio_advisor_reasoning_model") or "deepseek/deepseek-r1").strip()
+    return (cfg.get("portfolio_advisor_reasoning_model") or "anthropic/claude-sonnet-4-6").strip()
 
 
 def _pm_provider(cfg: Dict[str, Any], model: str) -> str:

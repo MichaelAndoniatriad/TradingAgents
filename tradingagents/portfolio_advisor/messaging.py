@@ -20,38 +20,46 @@ logger = logging.getLogger(__name__)
 
 
 def ntfy_verdict(text: str, ticker: str) -> str:
-    """Extract verdict + required action from analysis text for a short ntfy message."""
+    """Reduce analysis text to a short actionable line for phone notifications."""
+    import re
+
     verdict = ""
-    required_action = ""
-    in_verdict = False
-    in_action = False
+    action = ""
+    in_verdict = in_action = False
     for line in text.splitlines():
         s = line.strip()
         upper = s.upper()
         if upper == "VERDICT":
-            in_verdict = True
-            in_action = False
+            in_verdict, in_action = True, False
             continue
         if upper in ("REQUIRED ACTION", "REQUIRED ACTIONS"):
-            in_action = True
-            in_verdict = False
+            in_action, in_verdict = True, False
             continue
         if s and upper == s and len(s) > 2:
-            in_verdict = False
-            in_action = False
+            in_verdict = in_action = False
             continue
         if in_verdict and s and not verdict:
-            verdict = s[:200]
-        if in_action and s and not required_action and s.lower() != "none":
-            required_action = s[:200]
-    parts = []
+            verdict = s
+        if in_action and s and not action and s.lower() != "none":
+            action = s
+
     if verdict:
-        parts.append(verdict)
-    if required_action:
-        parts.append(f"Action: {required_action}")
-    if not parts:
-        parts.append(text[:300])
-    return "\n".join(parts)
+        out = verdict[:120]
+        if action and action.lower() not in verdict.lower():
+            out = f"{out} — {action[:80]}"
+        return out
+
+    # Fall back: find BUY/SELL/HOLD/TRIM/EXIT keyword and surrounding sentence
+    for kw in re.findall(r'\b(BUY|SELL|HOLD|TRIM|WATCH|EXIT)\b', text[:1500], re.IGNORECASE):
+        kw_upper = kw.upper()
+        for sent in re.split(r'[.!\n]', text[:1000]):
+            if kw_upper in sent.upper():
+                clean = sent.strip()[:120]
+                if clean:
+                    return clean
+        return kw_upper
+
+    return text[:120]
 
 _MAX_BODY_PERSISTED = 50000
 
@@ -161,7 +169,7 @@ def send_advisor_message(cfg: Dict[str, Any], subject: str, body: str) -> bool:
     webhook_attempted = bool(url)
     if url:
         try:
-            webhook_ok = bool(send_webhook(url, f"*{subject}*\n\n{body[:15000]}"))
+            webhook_ok = bool(send_webhook(url, body[:4000], extra={"title": subject}))
         except Exception as e:
             logger.warning("advisor webhook failed: %s", e)
     smtp_ok = False
