@@ -66,6 +66,13 @@ class AdvisorPMTickerStance(BaseModel):
         description="Advisory stance only; never implies an executed trade.",
     )
     rationale: str = Field(default="", description="One or two sentences.")
+    evidence_refs: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Evidence IDs supporting this stance, e.g. event log IDs, research file IDs, "
+            "pending job IDs, or context refs supplied in the PM prompt."
+        ),
+    )
 
 
 class AdvisorPMAppendJob(BaseModel):
@@ -83,6 +90,47 @@ class AdvisorPMAppendJob(BaseModel):
         "routine_monitoring",
     ] = Field(default="thesis_check")
     rationale: str = Field(default="", description="Why this job should run.")
+    source: Literal[
+        "pm_missing_evidence",
+        "pm_human_request",
+        "pm_conflict",
+        "pm_stale_evidence",
+        "pm_followup",
+    ] = Field(
+        default="pm_followup",
+        description="Why the PM is appending this job instead of relying on routine planner cadence.",
+    )
+    evidence_question: str = Field(
+        default="",
+        description="The specific question this job should answer, used for dedupe and audit logs.",
+    )
+    supersedes_job_id: str = Field(
+        default="",
+        description="Pending job ID this request replaces or accelerates, when applicable.",
+    )
+
+
+class AdvisorPMCandidateComparison(BaseModel):
+    """PM comparison of a promoted candidate against current holdings."""
+
+    candidate_ticker: str = Field(description="Uppercase candidate symbol. This may be outside the live portfolio.")
+    better_than_current_holding: Literal["yes", "no", "unknown"] = Field(
+        default="unknown",
+        description="Whether the candidate appears better than at least one current holding on available evidence.",
+    )
+    replace_or_add: Literal["replace", "add", "watch", "reject", "unknown"] = Field(
+        default="unknown",
+        description="Portfolio-level next step for the candidate. Advisory only; no trade execution.",
+    )
+    compared_against: List[str] = Field(
+        default_factory=list,
+        description="Live portfolio tickers the candidate was compared against.",
+    )
+    rationale: str = Field(default="", description="Short comparison rationale grounded in evidence.")
+    evidence_refs: List[str] = Field(
+        default_factory=list,
+        description="Evidence refs supporting this candidate comparison.",
+    )
 
 
 class AdvisorPMCycleResult(BaseModel):
@@ -114,11 +162,32 @@ class AdvisorPMCycleResult(BaseModel):
         default="",
         description="One short sentence logged when request_replan is true.",
     )
+    replan_reason_code: Literal[
+        "portfolio_changed",
+        "schedule_conflict",
+        "coverage_gap",
+        "human_requested",
+        "other",
+    ] = Field(
+        default="other",
+        description="Structured reason for request_replan; used for PM governance logs.",
+    )
     append_jobs: List[AdvisorPMAppendJob] = Field(
         default_factory=list,
         description=(
             "Up to five extra pending jobs appended after any replan. Tickers must still be in the "
             "live export; unknown symbols are skipped."
+        ),
+    )
+    evidence_refs: List[str] = Field(
+        default_factory=list,
+        description="Portfolio-wide evidence refs used for the executive summary and forward tasks.",
+    )
+    candidate_comparisons: List[AdvisorPMCandidateComparison] = Field(
+        default_factory=list,
+        description=(
+            "Use only for promoted candidates supplied in extra_context. Candidate tickers are not live "
+            "stances unless they also appear in the live portfolio snapshot."
         ),
     )
     push_note: str = Field(

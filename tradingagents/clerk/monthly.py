@@ -16,20 +16,40 @@ from tradingagents.llm_clients import create_llm_client
 
 from tradingagents.clerk.deep_runner import run_deep_research, save_deep_report
 from tradingagents.clerk.notify import get_clerk_webhook_url, post_text
+from tradingagents.portfolio_advisor import etoro_scan
+from tradingagents.portfolio_advisor.candidates import (
+    append_candidate_records,
+    evaluate_candidates_with_evidence,
+    queue_candidate_research_jobs,
+    run_promoted_candidate_pm_comparison,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def load_monthly_candidates(path: Path) -> Tuple[List[str], str]:
-    """Return (uppercased tickers, optional theme notes)."""
+def load_monthly_candidate_items(path: Path) -> Tuple[List[Any], str]:
+    """Return (candidate items, optional theme notes). Items may be strings or objects."""
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("Monthly candidates JSON must be an object")
     raw = data.get("candidates") or data.get("tickers") or []
     if not isinstance(raw, list) or not raw:
         raise ValueError("'candidates' (or 'tickers') must be a non-empty array")
-    tickers = [str(t).strip().upper() for t in raw if str(t).strip()]
     theme = str(data.get("theme") or data.get("notes") or "").strip()
+    return raw, theme
+
+
+def load_monthly_candidates(path: Path) -> Tuple[List[str], str]:
+    """Return (uppercased tickers, optional theme notes). Backwards-compatible helper."""
+    raw, theme = load_monthly_candidate_items(path)
+    tickers = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            tickers.append(item.strip().upper())
+        elif isinstance(item, dict):
+            t = str(item.get("ticker") or item.get("symbol") or "").strip().upper()
+            if t:
+                tickers.append(t)
     return tickers, theme
 
 
@@ -96,8 +116,35 @@ def run_monthly_lookout(
     """Run capped deep research on candidates + one consolidation memo."""
     cfg = (config or DEFAULT_CONFIG).copy()
     td = trade_date or date.today().strftime("%Y-%m-%d")
-    tickers, theme = load_monthly_candidates(candidates_path)
-    cap = max(1, min(int(max_deep), len(tickers)))
+    raw_candidates, theme = load_monthly_candidate_items(candidates_path)
+    try:
+        _p, _t, live_raw, _rows = etoro_scan.fetch_portfolio_rows()
+        live_tickers = {str(t).strip().upper() for t in live_raw if str(t).strip()}
+    except Exception:
+        live_tickers = set()
+    candidate_records = evaluate_candidates_with_evidence(
+        cfg,
+        raw_candidates,
+        live_tickers=live_tickers,
+        theme=theme,
+    )
+    append_candidate_records(cfg, candidate_records)
+    queued_light = queue_candidate_research_jobs(cfg, candidate_records)
+    pm_compared = 0
+    pm_compare_error = ""
+    try:
+        pm_compared = run_promoted_candidate_pm_comparison(
+            cfg,
+            candidate_records,
+            live_tickers=live_tickers,
+        )
+    except Exception as e:
+        logger.warning("candidate PM comparison failed: %s", e)
+        pm_compare_error = str(e)
+
+    eligible = [r for r in candidate_records if r.status in {"research_queued", "promoted"}]
+    tickers = [r.ticker for r in eligible]
+    cap = max(0, min(int(max_deep), len(tickers)))
     use_analysts = analysts or ["market", "social", "news", "fundamentals"]
 
     lines = [
@@ -107,9 +154,17 @@ def run_monthly_lookout(
         "",
         f"Candidates file: `{candidates_path}`",
         f"Theme / notes: {theme or '—'}",
-        f"Deep runs this pass (cap {cap}): {', '.join(tickers[:cap])}",
+        f"Candidate gate: {len(candidate_records)} reviewed, {len(eligible)} eligible, {queued_light} light checks queued.",
+        f"PM candidate comparisons: {pm_compared}" + (f" (error: {pm_compare_error})" if pm_compare_error else ""),
+        f"Deep runs this pass (cap {cap}): {', '.join(tickers[:cap]) if cap else 'none'}",
         "",
     ]
+
+    lines.append("## Candidate gate\n")
+    for r in candidate_records:
+        fail = f" failures={','.join(r.gate_failures)}" if r.gate_failures else ""
+        lines.append(f"- **{r.ticker}** — `{r.status}` priority={r.priority}{fail}. {r.next_action}")
+    lines.append("")
 
     sections: List[str] = []
     for t in tickers[:cap]:
@@ -134,6 +189,8 @@ def run_monthly_lookout(
             f"\n_Not run this month (over cap): {', '.join(tickers[cap:])}. "
             f"Raise `max_deep` or trim the candidate list._\n"
         )
+    if not tickers:
+        lines.append("\n_No candidates passed gates for deep research this month._\n")
 
     synth = _summarize_monthly(sections, theme, cfg)
     lines.append("\n## Monthly synthesis (LLM)\n\n")

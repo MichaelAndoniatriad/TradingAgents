@@ -59,6 +59,9 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_TRADING_MEMORY_PROMPT_CHARS": "portfolio_advisor_pm_trading_memory_prompt_chars",
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_SNAPSHOT_CHARS": "portfolio_advisor_pm_portfolio_snapshot_chars",
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_COMPACT_JSON": "portfolio_advisor_pm_compact_prompt_json",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_EVIDENCE_STALE_DAYS": "portfolio_advisor_pm_evidence_stale_days",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_PM_CANDIDATE_COMPARISON": "portfolio_advisor_pm_candidate_comparison",
+    "TRADINGAGENTS_PORTFOLIO_ADVISOR_CANDIDATE_MARKET_DATA": "portfolio_advisor_candidate_market_data_enabled",
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_PLANNER_PORTFOLIO_CHARS": "portfolio_advisor_planner_portfolio_chars",
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_PLANNER_CATALYST_CHARS": "portfolio_advisor_planner_catalyst_chars",
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_POST_VERDICT_PORTFOLIO_CHARS": "portfolio_advisor_post_verdict_portfolio_chars",
@@ -121,7 +124,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "portfolio_advisor_inject_prior_clerk_report": True,
     "portfolio_advisor_prior_clerk_report_max_chars": 16000,
     # Advisor-level PM council (separate from LangGraph's Portfolio Manager node).
-    "portfolio_advisor_pm_model": None,
+    "portfolio_advisor_pm_model": "openai/gpt-5.5",
     "portfolio_advisor_pm_log_path": None,
     # Master switch for advisor PM (set False only to pause all PM automation, e.g. tests or cost cap).
     "portfolio_advisor_pm_enabled": True,
@@ -150,6 +153,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "portfolio_advisor_pm_prior_context_total_chars": 2600,
     "portfolio_advisor_pm_compact_prompt_json": True,
     "portfolio_advisor_pm_extra_context_chars": 3200,
+    # Research older than this is considered stale for PM action stances unless refreshed.
+    "portfolio_advisor_pm_evidence_stale_days": 30,
+    # When monthly lookout promotes a candidate, ask the PM council to compare it with current holdings.
+    "portfolio_advisor_pm_candidate_comparison": True,
+    # Best-effort yfinance enrichment for candidate liquidity gates when avg_daily_volume is not supplied.
+    "portfolio_advisor_candidate_market_data_enabled": True,
     # Planner / replan LLM: portfolio export + catalyst digest size (characters).
     "portfolio_advisor_planner_portfolio_chars": 10000,
     "portfolio_advisor_planner_catalyst_chars": 7000,

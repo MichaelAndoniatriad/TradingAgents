@@ -19,7 +19,6 @@ from tradingagents.llm_clients.corporate_llm_factory import build_corporate_hier
 from tradingagents.agents import *
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.agents.utils.memory import TradingMemoryLog
-from tradingagents.agents.utils.rating import parse_rating
 from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.agents.utils.agent_states import (
     AgentState,
@@ -501,16 +500,22 @@ class TradingAgentsGraph:
         )
 
         decision_text = str(final_state.get("final_trade_decision") or "")
-        rating = parse_rating(decision_text)
         try:
             from tradingagents.agents.utils.event_log import append_event
+            from tradingagents.portfolio_advisor.ticker_decision import extract_ticker_decision
+
+            ticker_decision = extract_ticker_decision(
+                ticker=company_name,
+                trade_date=str(trade_date),
+                final_trade_decision=decision_text,
+            )
 
             append_event(
                 self.config,
                 {
                     "ticker": company_name,
                     "event_type": "full_graph_decision",
-                    "key_data": {"trade_date": str(trade_date), "rating": rating},
+                    "key_data": ticker_decision,
                     "outcome": None,
                 },
             )

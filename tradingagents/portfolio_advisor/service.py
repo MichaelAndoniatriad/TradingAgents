@@ -128,6 +128,9 @@ def _jobs_from_plan(plan: AdvisorPlanResult, cfg: Dict[str, Any]) -> List[Dict[s
                 "created_at": now.isoformat(),
                 "execution_tier": spec.execution_tier,
                 "job_type": (spec.job_type or "routine_monitoring").strip(),
+                "source": "planner",
+                "evidence_question": (spec.rationale or "").strip()[:300],
+                "supersedes_job_id": "",
                 "flags": list(spec.flags or []),
             }
         )
@@ -310,7 +313,14 @@ def _run_job(j: Dict[str, Any], cfg: Dict[str, Any], live: set, trade_date: str)
     if not tid or not jid:
         return {"ticker": tid, "status": "skipped", "verdict": ""}
 
-    if tid not in live:
+    try:
+        from tradingagents.portfolio_advisor.candidates import is_candidate_job
+
+        candidate_job = is_candidate_job(j)
+    except Exception:
+        candidate_job = False
+
+    if tid not in live and not candidate_job:
         _save_job_outcome(cfg, jid, "cancelled")
         return {"ticker": tid, "status": "cancelled", "verdict": ""}
 
@@ -331,6 +341,12 @@ def _run_job(j: Dict[str, Any], cfg: Dict[str, Any], live: set, trade_date: str)
                 ingest_from_analysis(cfg, tid, dec, source="full_graph")
             except Exception as e:
                 logger.warning("ingest_from_analysis failed for %s: %s", tid, e)
+            try:
+                from tradingagents.portfolio_advisor.candidates import handle_candidate_full_graph_result
+
+                handle_candidate_full_graph_result(cfg, j, dec, live_tickers=live)
+            except Exception as e:
+                logger.warning("candidate full_graph transition failed for %s: %s", tid, e)
             _save_job_outcome(cfg, jid, "completed")
             verdict = messaging.ntfy_verdict(dec, tid)
             return {"ticker": tid, "status": "completed", "verdict": verdict}
@@ -341,6 +357,12 @@ def _run_job(j: Dict[str, Any], cfg: Dict[str, Any], live: set, trade_date: str)
                 ingest_from_analysis(cfg, tid, analysis_text or "", source=f"single_model_{job_type}")
             except Exception as e:
                 logger.warning("ingest_from_analysis failed for %s: %s", tid, e)
+            try:
+                from tradingagents.portfolio_advisor.candidates import handle_candidate_light_research_result
+
+                handle_candidate_light_research_result(cfg, j, analysis_text or "")
+            except Exception as e:
+                logger.warning("candidate light research transition failed for %s: %s", tid, e)
             _save_job_outcome(cfg, jid, "completed")
             verdict = messaging.ntfy_verdict(analysis_text or "", tid)
             return {"ticker": tid, "status": "completed", "verdict": verdict}

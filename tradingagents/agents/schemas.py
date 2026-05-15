@@ -3,7 +3,7 @@
 The framework's primary artifact is still prose: each agent's natural-language
 reasoning is what users read in the saved markdown reports and what the
 downstream agents read as context.  Structured output is layered onto the
-three decision-making agents (Research Manager, Trader, Portfolio Manager)
+three decision-making agents (Research Manager, Trader, Single-Name Decision Manager)
 so that:
 
 - Their outputs follow consistent section headers across runs and providers
@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 
 
 class PortfolioRating(str, Enum):
-    """5-tier rating used by the Research Manager and Portfolio Manager."""
+    """5-tier rating used by the Research Manager and single-name decision manager."""
 
     BUY = "Buy"
     OVERWEIGHT = "Overweight"
@@ -40,7 +40,7 @@ class PortfolioRating(str, Enum):
 
 
 class ConfidenceLevel(str, Enum):
-    """How strongly the evidence supports the advisory rating (Portfolio Manager)."""
+    """How strongly the evidence supports the advisory rating."""
 
     HIGH = "High"
     MEDIUM = "Medium"
@@ -53,7 +53,7 @@ class TraderAction(str, Enum):
     The Trader's job is to translate the Research Manager's investment plan
     into a concrete transaction proposal: should the desk execute a Buy, a
     Sell, or sit on Hold this round.  Position sizing and the nuanced
-    Overweight / Underweight calls happen later at the Portfolio Manager.
+    Overweight / Underweight calls happen later at the single-name decision manager.
     """
 
     BUY = "Buy"
@@ -179,12 +179,12 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Portfolio Manager
+# Single-Name Decision Manager
 # ---------------------------------------------------------------------------
 
 
 class PortfolioDecision(BaseModel):
-    """Structured output produced by the Portfolio Manager.
+    """Structured output produced by the graph-level single-name decision manager.
 
     The model fills every field as part of its primary LLM call; no separate
     extraction pass is required. Field descriptions double as the model's

@@ -29,6 +29,8 @@ EVENT_WEIGHTS: Dict[str, int] = {
     "bootstrap_position_failed": 3,
     "portfolio_bootstrap_complete": 6,
     "advisor_pm_cycle": 8,
+    "pm_validation_override": 8,
+    "candidate_status_changed": 6,
     "advisor_replan_skipped": 1,
 }
 
@@ -91,13 +93,14 @@ def _event_day(row: Dict[str, Any]) -> Optional[str]:
 
 
 _COMPACT_EVENT_TYPES = frozenset(
-    {"full_graph_decision", "single_model_analysis", "outcome_recorded"}
+    {"full_graph_decision", "single_model_analysis", "outcome_recorded", "candidate_status_changed"}
 )
 
 _COMPACT_ET_ALIAS = {
     "full_graph_decision": "deep",
     "single_model_analysis": "quick",
     "outcome_recorded": "outcome",
+    "candidate_status_changed": "candidate",
 }
 
 
@@ -195,6 +198,8 @@ def format_recent_events_for_ticker(
                 pnl = kd.get("pnl_pct")
                 align = str(r.get("outcome") or kd.get("outcome_alignment") or "?")
                 verdict = f"align={align}" + (f" pnl={float(pnl):+.1f}%" if pnl is not None else "")
+            elif et == "candidate_status_changed":
+                verdict = f"{kd.get('status', '?')} via {kd.get('source', '?')}: {str(kd.get('next_action') or '')[:60]}"
             else:
                 verdict = str(kd.get("excerpt") or "").replace("\n", " ").strip()[:80]
             lines.append(f"{str(r.get('timestamp') or '')[:10]} | {alias} | {verdict}")

@@ -73,6 +73,51 @@ def test_jobs_from_plan_filters_and_caps_future():
     assert rows[0]["job_type"] == "routine_monitoring"
 
 
+def test_run_job_allows_candidate_when_not_live(tmp_path):
+    cfg = _cfg(tmp_path)
+    job = {
+        "id": "cand1",
+        "ticker": "ASML",
+        "status": "pending",
+        "execution_tier": "single_model",
+        "job_type": "thesis_check",
+        "source": "candidate_gate",
+        "reason": "candidate",
+    }
+    st = state.default_state()
+    st["jobs"] = [dict(job)]
+    state.save_state(cfg, st)
+
+    with patch("tradingagents.portfolio_advisor.service.run_single_model_analysis", return_value="VERDICT\nBROKEN."):
+        with patch("tradingagents.portfolio_advisor.service._post_batch_pm_brief"):
+            out = pas._run_job(job, cfg, live=set(), trade_date="2026-05-15")
+
+    assert out["status"] == "completed"
+    st2 = state.load_state(cfg)
+    assert st2["jobs"][0]["status"] == "completed"
+
+
+def test_run_job_cancels_non_candidate_when_not_live(tmp_path):
+    cfg = _cfg(tmp_path)
+    job = {
+        "id": "plan1",
+        "ticker": "ASML",
+        "status": "pending",
+        "execution_tier": "single_model",
+        "job_type": "thesis_check",
+        "source": "planner",
+    }
+    st = state.default_state()
+    st["jobs"] = [dict(job)]
+    state.save_state(cfg, st)
+
+    out = pas._run_job(job, cfg, live=set(), trade_date="2026-05-15")
+
+    assert out["status"] == "cancelled"
+    st2 = state.load_state(cfg)
+    assert st2["jobs"][0]["status"] == "cancelled"
+
+
 def test_replan_skip_llm_unchanged(tmp_path):
     cfg = {
         **_cfg(tmp_path),

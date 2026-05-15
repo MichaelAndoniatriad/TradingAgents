@@ -13,7 +13,10 @@ from tradingagents.agents.schemas import (
 from tradingagents.graph.reflection import Reflector
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.graph.propagation import Propagator
-from tradingagents.agents.managers.portfolio_manager import create_portfolio_manager
+from tradingagents.agents.managers.portfolio_manager import (
+    create_portfolio_manager,
+    create_single_name_decision_manager,
+)
 
 _SEP = TradingMemoryLog._SEPARATOR
 
@@ -869,6 +872,10 @@ class TestLegacyRemoval:
         create_portfolio_manager(mock_llm)
         with pytest.raises(TypeError):
             create_portfolio_manager(mock_llm, memory=MagicMock())
+
+    def test_single_name_decision_manager_alias(self):
+        mock_llm = MagicMock()
+        assert callable(create_single_name_decision_manager(mock_llm))
 
     def test_full_pipeline_no_regression(self, tmp_path):
         """propagate() completes and stores the decision after the redesign."""

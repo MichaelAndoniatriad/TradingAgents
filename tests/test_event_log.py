@@ -42,3 +42,24 @@ def test_load_events_for_review_filters(tmp_path):
     )
     rows = event_log.load_events_for_review(cfg, days=120)
     assert len(rows) == 1
+
+
+def test_compact_tail_includes_candidate_status(tmp_path):
+    cfg = {"event_log_path": str(tmp_path / "candidate.jsonl")}
+    event_log.append_event(
+        cfg,
+        {
+            "ticker": "ASML",
+            "event_type": "candidate_status_changed",
+            "key_data": {
+                "status": "research_queued",
+                "source": "candidate_gate",
+                "next_action": "Queue light thesis_check.",
+            },
+        },
+    )
+
+    txt = event_log.format_recent_events_for_ticker(cfg, "ASML", days=30, max_events=5, compact=True)
+
+    assert "candidate" in txt
+    assert "research_queued" in txt

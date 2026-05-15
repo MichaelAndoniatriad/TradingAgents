@@ -1,4 +1,4 @@
-"""Portfolio Manager: synthesises the risk-analyst debate into the final decision.
+"""Single-name decision manager: synthesises risk debate into the final decision.
 
 Uses LangChain's ``with_structured_output`` so the LLM produces a typed
 ``PortfolioDecision`` directly, in a single call.  The result is rendered
@@ -25,7 +25,7 @@ from tradingagents.agents.utils.structured import (
 
 
 def create_portfolio_manager(llm):
-    structured_llm = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
+    structured_llm = bind_structured(llm, PortfolioDecision, "Single-Name Decision Manager")
 
     def portfolio_manager_node(state) -> dict:
         instrument_context = build_instrument_context(state["company_of_interest"])
@@ -44,7 +44,7 @@ def create_portfolio_manager(llm):
 
         # Static: role + scope + rating scale + policy — cached across all ticker runs for the same session.
         static_system = (
-            "You are the Portfolio Manager for a **single-name** advisory workflow.\n\n"
+            "You are the Single-Name Decision Manager for a ticker-level advisory workflow.\n\n"
             "**Critical scope:** You do **not** execute trades, connect to a broker, or place orders. Your output is a **written plan** for the human: what stance to consider (Buy / Overweight / Hold / Underweight / Sell), how confident the evidence is, how to think about the name emotionally in a disciplined way, and what would change that view. The analysts and debate above are **inputs** you judge — not instructions to auto-trade.\n\n"
             "---\n\n"
             "**Advisory rating scale** (pick exactly one for the human's planning):\n"
@@ -84,7 +84,7 @@ def create_portfolio_manager(llm):
             llm,
             messages,
             render_pm_decision,
-            "Portfolio Manager",
+            "Single-Name Decision Manager",
         )
 
         new_risk_debate_state = {
@@ -106,3 +106,13 @@ def create_portfolio_manager(llm):
         }
 
     return portfolio_manager_node
+
+
+def create_single_name_decision_manager(llm):
+    """Clearer alias for the graph-level single-ticker decision node.
+
+    ``create_portfolio_manager`` remains for backwards compatibility with the
+    original graph naming. The advisor-level PM council owns portfolio-wide
+    authority.
+    """
+    return create_portfolio_manager(llm)

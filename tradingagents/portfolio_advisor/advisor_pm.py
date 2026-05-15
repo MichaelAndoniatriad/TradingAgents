@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -20,12 +21,22 @@ from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.agents.utils.structured import bind_structured
 from tradingagents.dataflows.config import set_config
 from tradingagents.llm_clients import create_llm_client
-from tradingagents.portfolio_advisor import etoro_scan, state
-from tradingagents.portfolio_advisor.models import AdvisorPMCycleResult
+from tradingagents.portfolio_advisor import etoro_scan, evidence, state
+from tradingagents.portfolio_advisor.models import AdvisorPMAppendJob, AdvisorPMCycleResult
 from tradingagents.portfolio_advisor.prompt_limits import cfg_int as _pm_int
 
 logger = logging.getLogger(__name__)
 _pm_memory_lock = threading.Lock()
+_ISO_DATE_RE = re.compile(r"(?<!\d)20\d{2}-\d{2}-\d{2}(?!\d)")
+_URGENCY_RE = re.compile(r"\b(urgent|urgently|deadline|before|by tomorrow|within 48h|within 48 hours|must)\b", re.I)
+
+_FULL_GRAPH_COMPATIBLE_STANCES = {
+    "Buy": {"buy", "add"},
+    "Overweight": {"buy", "add", "hold", "watch"},
+    "Hold": {"hold", "watch"},
+    "Underweight": {"trim", "sell", "watch", "hold"},
+    "Sell": {"sell", "trim"},
+}
 
 # ---------------------------------------------------------------------------
 # PM_CLAUDE.md + PM_MEMORY.md — structured memory system for the PM
@@ -44,12 +55,22 @@ You are the Portfolio Manager (PM) for a personal investment portfolio.
 ## Hard rules — never break these
 - Never invent deadlines, cut rules, stop-loss triggers, position sizing rules, or trading constraints
   that the human has not explicitly stated. If you don't see it in the data you were given, it does not exist.
+- Never invent research findings, decision history, catalysts, earnings dates, or calendar dates. Treat absent
+  evidence as absent evidence.
 - Never say a ticker "must" be cut by a date or "should" be trimmed by X% unless the human told you so.
 - If you are uncertain whether a rule exists, say "I don't have a rule for that — do you want to set one?"
 - Pending jobs in the queue are SCHEDULED research jobs. They do not mean the ticker lacks analysis or is
   in crisis. Do not frame a May 26 scheduled job as "urgently awaiting thesis results."
 - Only flag urgency when: (a) a job is overdue by >24h, (b) a catalyst is within 48h, or (c) the human
   explicitly asked for something and it hasn't run yet.
+
+## Evidence discipline
+- Base answers on the portfolio snapshot, pending jobs, completed research results, PM memory, and explicit
+  caller notes supplied in the prompt.
+- If the answer depends on missing or stale information, say what is missing and queue follow-up research with
+  append_jobs instead of filling the gap yourself.
+- Use full_graph when the question needs a new multi-agent research layer; use single_model for a quick
+  thesis check, weekly summary, post-earnings read, or routine monitor.
 
 ## When answering /ask questions via ntfy
 - Answer directly. Verdict first, reasoning after.
@@ -289,11 +310,306 @@ def _recent_analysis_block(cfg: Dict[str, Any], tickers: List[str]) -> str:
         return ""
 
 
+def _pm_evidence_context(
+    cfg: Dict[str, Any],
+    tickers: List[str],
+    pending_jobs: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    return evidence.collect_pm_evidence(cfg, tickers, pending_jobs=pending_jobs)
+
+
+def _text_dates(*parts: str) -> set[str]:
+    found: set[str] = set()
+    for part in parts:
+        found.update(_ISO_DATE_RE.findall(str(part or "")))
+    return found
+
+
+def _parse_pm_ts(raw: Any) -> Optional[datetime]:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _has_newer_completed_evidence(
+    stance_refs: List[str],
+    *,
+    graph_decision: Dict[str, Any],
+    evidence_by_id: Dict[str, Dict[str, Any]],
+) -> bool:
+    graph_ts = _parse_pm_ts(graph_decision.get("timestamp"))
+    if graph_ts is None:
+        return False
+    for ref in stance_refs:
+        row = evidence_by_id.get(str(ref))
+        if not row:
+            continue
+        if str(row.get("kind") or "") not in {"single_model_analysis", "full_graph_decision", "post_earnings_verdict", "deep_report_file"}:
+            continue
+        ref_ts = _parse_pm_ts(row.get("timestamp"))
+        if ref_ts and ref_ts > graph_ts:
+            return True
+    return False
+
+
+def _ensure_conflict_research_job(result: AdvisorPMCycleResult, ticker: str, graph_rating: str) -> bool:
+    tk = ticker.strip().upper()
+    if any(str(j.ticker or "").strip().upper() == tk for j in (result.append_jobs or [])):
+        return False
+    result.append_jobs.append(
+        AdvisorPMAppendJob(
+            ticker=tk,
+            execution_tier="single_model",
+            job_type="thesis_check",
+            rationale=(
+                f"Resolve advisor PM disagreement with latest full-graph decision "
+                f"({graph_rating or 'unknown'})."
+            ),
+            source="pm_conflict",
+            evidence_question=(
+                f"Does newer evidence justify changing {tk} away from the latest "
+                f"full-graph decision ({graph_rating or 'unknown'})?"
+            ),
+        )
+    )
+    return True
+
+
+def _validate_pm_cycle_result(
+    cfg: Dict[str, Any],
+    result: AdvisorPMCycleResult,
+    *,
+    live_tickers: set[str],
+    evidence_context: Dict[str, Any],
+    pending_jobs: List[Dict[str, Any]],
+    trigger: str,
+) -> List[Dict[str, Any]]:
+    """Enforce council governance rules after the LLM returns structured output."""
+    overrides: List[Dict[str, Any]] = []
+    by_ticker: Dict[str, List[str]] = evidence_context.get("by_ticker") or {}
+    known_dates = set(evidence_context.get("known_dates") or [])
+    stale_tickers: Dict[str, Dict[str, Any]] = evidence_context.get("stale_tickers") or {}
+    latest_full_graph: Dict[str, Dict[str, Any]] = evidence_context.get("latest_full_graph_decisions") or {}
+    evidence_by_id = {
+        str(e.get("id")): e for e in (evidence_context.get("evidence") or []) if e.get("id")
+    }
+    allowed_refs = {str(e.get("id")) for e in (evidence_context.get("evidence") or []) if e.get("id")}
+
+    # Keep portfolio-level refs citable even when the model omitted them.
+    if not result.evidence_refs:
+        refs = [str(e.get("id")) for e in (evidence_context.get("evidence") or [])[:5] if e.get("id")]
+        result.evidence_refs = refs
+
+    for stance in result.stances:
+        tk = str(stance.ticker or "").strip().upper()
+        stance.ticker = tk
+        if tk and tk not in live_tickers:
+            old = stance.stance
+            stance.stance = "unknown"
+            stance.rationale = (
+                (stance.rationale or "").strip()
+                + " Ticker is not in the live portfolio snapshot; use candidate_comparisons for non-held candidates."
+            ).strip()
+            overrides.append(
+                {
+                    "field": f"stances.{tk}.stance",
+                    "action": "downgraded_non_live_ticker",
+                    "from": old,
+                }
+            )
+            continue
+        existing = [r for r in (stance.evidence_refs or []) if str(r).strip()]
+        valid_existing = [r for r in existing if r in allowed_refs or r.startswith(("caller:", "memory:", "pm_cycle:"))]
+        if valid_existing != existing:
+            overrides.append({"field": f"stances.{tk}.evidence_refs", "action": "removed_unknown_refs"})
+        stance.evidence_refs = valid_existing
+        if not stance.evidence_refs and tk in live_tickers:
+            refs = list(by_ticker.get(tk) or [])[:3]
+            stance.evidence_refs = refs
+        stale_info = stale_tickers.get(tk)
+        if (
+            stale_info
+            and stance.stance in {"buy", "sell", "trim", "add"}
+            and not any(str(j.ticker or "").strip().upper() == tk for j in (result.append_jobs or []))
+        ):
+            reason = str(stale_info.get("reason") or "missing_research")
+            source = "pm_stale_evidence" if reason == "stale_research" else "pm_missing_evidence"
+            result.append_jobs.append(
+                AdvisorPMAppendJob(
+                    ticker=tk,
+                    execution_tier="single_model",
+                    job_type="thesis_check",
+                    rationale=(
+                        "Refresh evidence before the council takes an action stance. "
+                        f"Reason: {reason}."
+                    ),
+                    source=source,
+                    evidence_question=f"Is the current {tk} thesis still intact, weakening, or broken?",
+                )
+            )
+            overrides.append(
+                {
+                    "field": f"append_jobs.{tk}",
+                    "action": "queued_evidence_refresh",
+                    "reason": reason,
+                    "latest_ref": stale_info.get("latest_ref"),
+                }
+            )
+        graph_decision = latest_full_graph.get(tk)
+        graph_rating = str((graph_decision or {}).get("decision") or "").split("/", 1)[0].strip()
+        compatible = _FULL_GRAPH_COMPATIBLE_STANCES.get(graph_rating)
+        if (
+            graph_decision
+            and compatible
+            and stance.stance != "unknown"
+            and stance.stance not in compatible
+            and not _has_newer_completed_evidence(
+                stance.evidence_refs,
+                graph_decision=graph_decision,
+                evidence_by_id=evidence_by_id,
+            )
+        ):
+            old = stance.stance
+            queued = _ensure_conflict_research_job(result, tk, graph_rating)
+            stance.stance = "unknown"
+            stance.rationale = (
+                (stance.rationale or "").strip()
+                + f" This conflicts with the latest full-graph decision ({graph_rating}); "
+                "newer cited evidence is required before changing stance."
+            ).strip()
+            overrides.append(
+                {
+                    "field": f"stances.{tk}.stance",
+                    "action": "downgraded_full_graph_conflict",
+                    "from": old,
+                    "latest_full_graph_ref": graph_decision.get("id"),
+                    "latest_full_graph_rating": graph_rating,
+                    "queued_conflict_research": queued,
+                }
+            )
+        if stance.stance in {"buy", "sell", "trim", "add"}:
+            has_research_ref = any(str(r).startswith("event:") for r in stance.evidence_refs)
+            if stale_info or not has_research_ref:
+                old = stance.stance
+                stance.stance = "unknown"
+                stance.rationale = (
+                    (stance.rationale or "").strip()
+                    + " Evidence is insufficient for an action stance; queue research before acting."
+                ).strip()
+                overrides.append(
+                    {
+                        "field": f"stances.{tk}.stance",
+                        "action": "downgraded_to_unknown",
+                        "from": old,
+                        "reason": (
+                            "action stance had stale or missing research evidence"
+                            if stale_info
+                            else "action stance lacked completed research evidence"
+                        ),
+                    }
+                )
+
+    live_sorted = sorted(live_tickers)
+    for cmp in result.candidate_comparisons:
+        cmp.candidate_ticker = str(cmp.candidate_ticker or "").strip().upper()
+        before = list(cmp.compared_against or [])
+        cmp.compared_against = [
+            str(t).strip().upper() for t in (cmp.compared_against or []) if str(t).strip().upper() in live_tickers
+        ]
+        if before != cmp.compared_against:
+            overrides.append(
+                {
+                    "field": f"candidate_comparisons.{cmp.candidate_ticker}.compared_against",
+                    "action": "removed_non_live_comparators",
+                }
+            )
+        if not cmp.compared_against and live_sorted:
+            cmp.compared_against = live_sorted[:5]
+            overrides.append(
+                {
+                    "field": f"candidate_comparisons.{cmp.candidate_ticker}.compared_against",
+                    "action": "auto_attached_live_comparators",
+                    "tickers": cmp.compared_against,
+                }
+            )
+        existing_refs = [r for r in (cmp.evidence_refs or []) if str(r).strip()]
+        valid_refs = [r for r in existing_refs if r in allowed_refs or r.startswith(("caller:", "memory:", "pm_cycle:", "candidate:"))]
+        if valid_refs != existing_refs:
+            cmp.evidence_refs = valid_refs
+            overrides.append(
+                {
+                    "field": f"candidate_comparisons.{cmp.candidate_ticker}.evidence_refs",
+                    "action": "removed_unknown_refs",
+                }
+            )
+
+    unknown_dates = sorted(
+        _text_dates(
+            result.executive_summary,
+            result.memory_note,
+            result.push_note,
+            result.replan_rationale,
+            *[s.rationale for s in result.stances],
+            *[j.rationale for j in result.append_jobs],
+        )
+        - known_dates
+    )
+    if unknown_dates:
+        overrides.append({"field": "dates", "action": "flagged_unknown_dates", "dates": unknown_dates})
+        if _text_dates(result.push_note) & set(unknown_dates):
+            result.push_note = ""
+            overrides.append({"field": "push_note", "action": "cleared_unknown_date", "dates": unknown_dates})
+
+    pending_overdue = False
+    now = datetime.now(timezone.utc)
+    for j in pending_jobs:
+        try:
+            sched = datetime.fromisoformat(str(j.get("scheduled_at") or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if sched.tzinfo is None:
+            sched = sched.replace(tzinfo=timezone.utc)
+        if sched < now - timedelta(hours=24):
+            pending_overdue = True
+            break
+    if result.push_note and _URGENCY_RE.search(result.push_note) and not pending_overdue and trigger != "ntfy_question":
+        result.push_note = ""
+        overrides.append(
+            {
+                "field": "push_note",
+                "action": "cleared_unsupported_urgency",
+                "reason": "no overdue job or explicit question context",
+            }
+        )
+
+    if result.request_replan and not result.replan_rationale.strip():
+        result.replan_rationale = "PM requested replan without a detailed rationale."
+        overrides.append({"field": "replan_rationale", "action": "filled_default"})
+
+    if overrides:
+        append_event(
+            cfg,
+            {
+                "ticker": "*",
+                "event_type": "pm_validation_override",
+                "key_data": {"trigger": trigger, "overrides": overrides[:20]},
+                "outcome": None,
+            },
+        )
+    return overrides
+
+
 def _pm_model(cfg: Dict[str, Any]) -> str:
     raw = cfg.get("portfolio_advisor_pm_model")
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
-    return (cfg.get("portfolio_advisor_reasoning_model") or "anthropic/claude-sonnet-4-6").strip()
+    return "openai/gpt-5.5"
 
 
 def _pm_provider(cfg: Dict[str, Any], model: str) -> str:
@@ -369,6 +685,15 @@ def _append_pm_memory_md(
     ]
     for s in result.stances:
         lines.append(f"- **{s.ticker}** — _{s.stance}_ — {s.rationale}\n")
+    if result.candidate_comparisons:
+        lines.append("\n### Candidate comparisons\n")
+        for c in result.candidate_comparisons:
+            against = ", ".join(c.compared_against) if c.compared_against else "current holdings"
+            lines.append(
+                f"- **{c.candidate_ticker}** — _{c.replace_or_add}_ — "
+                f"better_than_current_holding={c.better_than_current_holding}; "
+                f"compared_against={against}; {c.rationale}\n"
+            )
     if result.forward_tasks:
         lines.append("\n### Forward tasks\n")
         for t in result.forward_tasks:
@@ -619,6 +944,9 @@ def execute_pending_approval(cfg: Dict[str, Any]) -> str:
                     "created_at": now.isoformat(),
                     "execution_tier": str(job.get("execution_tier") or "single_model"),
                     "job_type": str(job.get("job_type") or "thesis_check"),
+                    "source": str(job.get("source") or "pm_human_request"),
+                    "evidence_question": str(job.get("evidence_question") or job.get("rationale") or "")[:300],
+                    "supersedes_job_id": str(job.get("supersedes_job_id") or ""),
                     "flags": ["PM_APPROVED"],
                 })
             if new_rows:
@@ -653,6 +981,7 @@ def apply_pm_cycle_followups(cfg: Dict[str, Any], result: AdvisorPMCycleResult) 
     actions["replan_error"] = None
     actions["jobs_appended"] = 0
     actions["jobs_skipped"] = []
+    actions["jobs_deduped"] = []
 
     if result.request_replan:
         try:
@@ -680,12 +1009,39 @@ def apply_pm_cycle_followups(cfg: Dict[str, Any], result: AdvisorPMCycleResult) 
         return actions
 
     st = state.load_state(cfg)
+    pending = state.list_pending_jobs(st)
     now = datetime.now(timezone.utc)
     new_rows: List[Dict[str, Any]] = []
     for i, job in enumerate(specs):
         tid = str(job.ticker or "").strip().upper()
         if not tid or tid not in live:
             actions["jobs_skipped"].append(tid or "?")
+            continue
+        job_type = str(job.job_type or "thesis_check").strip()
+        evidence_question = (job.evidence_question or job.rationale or "").strip()[:300]
+        source = str(job.source or "pm_followup").strip()
+        duplicate = None
+        for existing in pending + new_rows:
+            if str(existing.get("ticker") or "").strip().upper() != tid:
+                continue
+            if str(existing.get("job_type") or "").strip() != job_type:
+                continue
+            existing_q = str(existing.get("evidence_question") or existing.get("reason") or "").strip()[:300]
+            if evidence_question and existing_q and evidence_question == existing_q:
+                duplicate = existing
+                break
+            if not evidence_question:
+                duplicate = existing
+                break
+        if duplicate:
+            actions["jobs_deduped"].append(
+                {
+                    "ticker": tid,
+                    "job_type": job_type,
+                    "existing_job_id": duplicate.get("id"),
+                    "source": source,
+                }
+            )
             continue
         when = now + timedelta(minutes=1)
         new_rows.append(
@@ -698,7 +1054,10 @@ def apply_pm_cycle_followups(cfg: Dict[str, Any], result: AdvisorPMCycleResult) 
                 "status": "pending",
                 "created_at": now.isoformat(),
                 "execution_tier": str(job.execution_tier or "single_model").strip(),
-                "job_type": str(job.job_type or "thesis_check").strip(),
+                "job_type": job_type,
+                "source": source,
+                "evidence_question": evidence_question,
+                "supersedes_job_id": str(job.supersedes_job_id or "").strip(),
                 "flags": ["PM_APPEND"],
             }
         )
@@ -816,6 +1175,18 @@ def run_pm_cycle(
     prior_txt = _prior_pm_context(cfg, current_tickers=live_tickers)
     prior_block = f"Prior PM context (most recent cycles):\n{prior_txt}\n\n" if prior_txt else ""
     tm_block = _trading_memory_digest_block(cfg)
+    recent_analysis_block = _recent_analysis_block(cfg, sorted(live_tickers))
+    evidence_context = _pm_evidence_context(cfg, sorted(live_tickers), pend)
+    evidence_block = _pm_json_for_prompt(
+        cfg,
+        {
+            "known_dates": evidence_context.get("known_dates") or [],
+            "stale_after_days": evidence_context.get("stale_after_days"),
+            "stale_tickers": evidence_context.get("stale_tickers") or {},
+            "latest_full_graph_decisions": evidence_context.get("latest_full_graph_decisions") or {},
+            "evidence": evidence_context.get("evidence") or [],
+        },
+    )
     claude_block = f"{pm_claude}\n\n" if pm_claude else ""
     memory_block = f"Your working memory (PM_MEMORY.md — recent notes to self):\n{pm_memory}\n\n" if pm_memory else ""
 
@@ -838,6 +1209,16 @@ Live tickers (normalized): {", ".join(sorted(live_tickers))}
 Pending advisor jobs preview (JSON):
 {pend_preview}
 
+Latest completed research decisions/results:
+{recent_analysis_block or "(none found in the recent event log)\n\n"}
+Retrieved evidence refs and known dates (JSON):
+{evidence_block}
+
+If stale_tickers is non-empty, do not make action stances for those names from old evidence. Queue or cite a
+fresh research job first.
+If latest_full_graph_decisions contains a ticker, treat it as the authoritative ticker-level decision. To
+disagree, cite newer completed evidence than that full-graph decision or queue conflict research.
+
 Last bootstrap summary (JSON, may be empty):
 {summ_txt or "(none)"}
 
@@ -847,9 +1228,15 @@ Last bootstrap summary (JSON, may be empty):
 Structured output fields (use defaults when unsure):
 - request_replan: set true only when the pending job queue should be fully rebuilt via the planner LLM
   (cancels current pending jobs). Set replan_rationale when true.
+- evidence_refs: cite the evidence IDs above for portfolio-level claims. Each non-unknown stance should cite
+  at least one evidence ref. Do not cite refs that are not present in the evidence JSON.
 - append_jobs: up to five extra pending jobs to queue without relying on the planner (use live tickers only).
   Each entry: ticker, execution_tier single_model or full_graph, job_type thesis_check|weekly_summary|post_earnings|routine_monitoring, rationale.
+  Set source to pm_missing_evidence, pm_human_request, pm_conflict, pm_stale_evidence, or pm_followup.
+  Fill evidence_question with the exact question that job should answer.
   If you set request_replan true, you may still append_jobs; they are added after the replan finishes.
+- candidate_comparisons: when Extra notes contain a Candidate comparison request, put each candidate assessment here.
+  Do not put non-held candidate tickers in stances. Compare candidates against live tickers only.
 - push_note: one short observation worth pushing to the human right now — deadline approaching, unexpected finding,
   stance change, catalyst within 48h. Max 280 chars. Leave empty if nothing urgent or new. This goes straight
   to the human's phone, so only fill it when you genuinely have something they need to know unprompted.
@@ -862,6 +1249,9 @@ portfolio is in dollars; give them the exact number so they can act immediately.
 
 Deliver structured output only. Stances must use tickers you see above. forward_tasks should be concrete
 (research X, schedule replan, verify Y thesis, respond to risk flag, etc.). memory_note is what you want your next self to read first.
+
+Do not create facts to make the memo feel complete. If completed research is missing, stale, or insufficient for
+the trigger, say that plainly and use append_jobs to send a new research layer to gather it.
 """
     client = create_llm_client(
         provider=provider,
@@ -886,6 +1276,14 @@ Deliver structured output only. Stances must use tickers you see above. forward_
         raw = llm.invoke([HumanMessage(content=prompt)])
         result = _coerce_pm_result_from_text(_content_from_llm_message(raw))
 
+    validation_overrides = _validate_pm_cycle_result(
+        cfg,
+        result,
+        live_tickers=live_tickers,
+        evidence_context=evidence_context,
+        pending_jobs=pend,
+        trigger=trigger_s,
+    )
     has_proposed_actions = bool(result.request_replan or result.append_jobs)
     if hold_for_approval and has_proposed_actions:
         save_pending_approval(cfg, result)
@@ -912,6 +1310,7 @@ Deliver structured output only. Stances must use tickers you see above. forward_
         "trigger": trigger_s,
         "model": model,
         "result": result.model_dump(),
+        "validation_overrides": validation_overrides,
         "actions_taken": actions_taken,
     }
     _append_pm_jsonl(cfg, row)

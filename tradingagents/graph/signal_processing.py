@@ -1,6 +1,6 @@
-"""Extract the 5-tier portfolio rating from the Portfolio Manager's decision.
+"""Extract the 5-tier rating from the graph single-name decision.
 
-The Portfolio Manager produces a typed ``PortfolioDecision`` via structured
+The single-name decision manager produces a typed ``PortfolioDecision`` via structured
 output and renders it to markdown that always carries a ``**Rating**: X``
 header (see :func:`tradingagents.agents.schemas.render_pm_decision`).  The
 deterministic heuristic in :mod:`tradingagents.agents.utils.rating` is more
@@ -18,7 +18,7 @@ from tradingagents.agents.utils.rating import parse_rating
 
 
 class SignalProcessor:
-    """Read the 5-tier rating out of a Portfolio Manager decision."""
+    """Read the 5-tier rating out of a graph single-name decision."""
 
     def __init__(self, quick_thinking_llm: Any = None):
         # The LLM argument is accepted for backwards compatibility but no

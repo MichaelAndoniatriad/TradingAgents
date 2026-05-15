@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.portfolio_advisor.advisor_pm import (
     _append_pm_memory_md,
+    _pm_model,
     apply_pm_cycle_followups,
     load_recent_pm_cycles,
     optional_pm_cycle_on_portfolio_change,
@@ -17,6 +18,7 @@ from tradingagents.portfolio_advisor.advisor_pm import (
 )
 from tradingagents.portfolio_advisor.models import (
     AdvisorPMAppendJob,
+    AdvisorPMCandidateComparison,
     AdvisorPMCycleResult,
     AdvisorPMTickerStance,
 )
@@ -48,6 +50,268 @@ def test_run_pm_cycle_writes_logs(tmp_path):
     assert len(rows) == 1
     assert rows[0]["trigger"] == "test_trigger"
     assert rows[0]["result"]["stances"][0]["ticker"] == "NVDA"
+
+
+def test_pm_default_model_is_gpt_55():
+    assert _pm_model({}) == "openai/gpt-5.5"
+
+
+def test_run_pm_cycle_prompt_includes_latest_research(tmp_path):
+    event_log = tmp_path / "events.jsonl"
+    cfg = {
+        "portfolio_advisor_dir": str(tmp_path / "pa"),
+        "event_log_path": str(event_log),
+    }
+    event_log.write_text(
+        (
+            '{"timestamp":"2026-05-15T09:00:00+00:00","ticker":"NVDA",'
+            '"event_type":"single_model_analysis","key_data":{"job_type":"thesis_check",'
+            '"excerpt":"Hold; margin thesis intact after latest check."},"outcome":null}\n'
+        ),
+        encoding="utf-8",
+    )
+    fake = AdvisorPMCycleResult(executive_summary="Test memo")
+    m_struct = MagicMock()
+    m_struct.invoke.return_value = fake
+    m_llm = MagicMock()
+    m_client = MagicMock()
+    m_client.get_llm.return_value = m_llm
+
+    with patch("tradingagents.portfolio_advisor.advisor_pm.etoro_scan.fetch_portfolio_rows") as fetch:
+        fetch.return_value = ({}, "portfolio text here", ["NVDA"], [])
+        with patch("tradingagents.portfolio_advisor.advisor_pm.create_llm_client", return_value=m_client):
+            with patch("tradingagents.portfolio_advisor.advisor_pm.bind_structured", return_value=m_struct):
+                with patch("tradingagents.portfolio_advisor.advisor_pm.append_event"):
+                    run_pm_cycle(cfg, trigger="test_trigger")
+
+    prompt = m_struct.invoke.call_args[0][0][0].content
+    assert "Latest completed research decisions/results:" in prompt
+    assert "Hold; margin thesis intact" in prompt
+    assert "Do not create facts" in prompt
+    assert "Retrieved evidence refs and known dates" in prompt
+
+
+def test_run_pm_cycle_downgrades_unsupported_action_stance(tmp_path):
+    cfg = {"portfolio_advisor_dir": str(tmp_path / "pa"), "event_log_path": str(tmp_path / "events.jsonl")}
+    fake = AdvisorPMCycleResult(
+        executive_summary="Sell NVDA because the thesis is broken.",
+        stances=[AdvisorPMTickerStance(ticker="NVDA", stance="sell", rationale="Thesis broken.")],
+    )
+    m_struct = MagicMock()
+    m_struct.invoke.return_value = fake
+    m_llm = MagicMock()
+    m_client = MagicMock()
+    m_client.get_llm.return_value = m_llm
+
+    with patch("tradingagents.portfolio_advisor.advisor_pm.etoro_scan.fetch_portfolio_rows") as fetch:
+        fetch.return_value = ({}, "portfolio text here", ["NVDA"], [])
+        with patch("tradingagents.portfolio_advisor.advisor_pm.create_llm_client", return_value=m_client):
+            with patch("tradingagents.portfolio_advisor.advisor_pm.bind_structured", return_value=m_struct):
+                with patch("tradingagents.portfolio_advisor.messaging.send_advisor_message"):
+                    out = run_pm_cycle(cfg, trigger="test_trigger")
+
+    assert out.stances[0].stance == "unknown"
+    assert "insufficient" in out.stances[0].rationale.lower()
+    rows = load_recent_pm_cycles(cfg, limit=1)
+    assert rows[0]["validation_overrides"]
+
+
+def test_run_pm_cycle_keeps_action_stance_with_research_evidence(tmp_path):
+    event_log = tmp_path / "events.jsonl"
+    cfg = {
+        "portfolio_advisor_dir": str(tmp_path / "pa"),
+        "event_log_path": str(event_log),
+    }
+    event_log.write_text(
+        (
+            '{"timestamp":"2026-05-15T09:00:00+00:00","ticker":"NVDA",'
+            '"event_type":"single_model_analysis","key_data":{"job_type":"thesis_check",'
+            '"excerpt":"Trim; thesis weakened after latest check."},"outcome":null}\n'
+        ),
+        encoding="utf-8",
+    )
+    fake = AdvisorPMCycleResult(
+        executive_summary="Trim NVDA based on latest research.",
+        stances=[
+            AdvisorPMTickerStance(
+                ticker="NVDA",
+                stance="trim",
+                rationale="Latest thesis check weakened.",
+                evidence_refs=["event:single_model_analysis:NVDA:2026-05-15"],
+            )
+        ],
+    )
+    m_struct = MagicMock()
+    m_struct.invoke.return_value = fake
+    m_llm = MagicMock()
+    m_client = MagicMock()
+    m_client.get_llm.return_value = m_llm
+
+    with patch("tradingagents.portfolio_advisor.advisor_pm.etoro_scan.fetch_portfolio_rows") as fetch:
+        fetch.return_value = ({}, "portfolio text here", ["NVDA"], [])
+        with patch("tradingagents.portfolio_advisor.advisor_pm.create_llm_client", return_value=m_client):
+            with patch("tradingagents.portfolio_advisor.advisor_pm.bind_structured", return_value=m_struct):
+                with patch("tradingagents.portfolio_advisor.messaging.send_advisor_message"):
+                    out = run_pm_cycle(cfg, trigger="test_trigger")
+
+    assert out.stances[0].stance == "trim"
+    assert out.stances[0].evidence_refs == ["event:single_model_analysis:NVDA:2026-05-15"]
+
+
+def test_run_pm_cycle_downgrades_conflict_with_latest_full_graph(tmp_path):
+    event_log = tmp_path / "events.jsonl"
+    cfg = {
+        "portfolio_advisor_dir": str(tmp_path / "pa"),
+        "event_log_path": str(event_log),
+    }
+    event_log.write_text(
+        (
+            '{"timestamp":"2026-05-15T09:00:00+00:00","ticker":"NVDA",'
+            '"event_type":"full_graph_decision","key_data":{'
+            '"decision_id":"dec1","trade_date":"2026-05-15","rating":"Hold",'
+            '"confidence":"Medium","summary":"Hold; evidence balanced.",'
+            '"thesis":"Balanced thesis."},"outcome":null}\n'
+        ),
+        encoding="utf-8",
+    )
+    fake = AdvisorPMCycleResult(
+        executive_summary="Sell NVDA.",
+        stances=[
+            AdvisorPMTickerStance(
+                ticker="NVDA",
+                stance="sell",
+                rationale="Looks broken.",
+                evidence_refs=["event:full_graph_decision:NVDA:2026-05-15"],
+            )
+        ],
+    )
+    m_struct = MagicMock()
+    m_struct.invoke.return_value = fake
+    m_llm = MagicMock()
+    m_client = MagicMock()
+    m_client.get_llm.return_value = m_llm
+
+    with patch("tradingagents.portfolio_advisor.advisor_pm.etoro_scan.fetch_portfolio_rows") as fetch:
+        fetch.return_value = ({}, "portfolio text here", ["NVDA"], [])
+        with patch("tradingagents.portfolio_advisor.advisor_pm.create_llm_client", return_value=m_client):
+            with patch("tradingagents.portfolio_advisor.advisor_pm.bind_structured", return_value=m_struct):
+                with patch("tradingagents.portfolio_advisor.messaging.send_advisor_message"):
+                    out = run_pm_cycle(cfg, trigger="test_trigger")
+
+    assert out.stances[0].stance == "unknown"
+    assert out.append_jobs[0].source == "pm_conflict"
+    rows = load_recent_pm_cycles(cfg, limit=1)
+    assert any(o["action"] == "downgraded_full_graph_conflict" for o in rows[0]["validation_overrides"])
+
+
+def test_run_pm_cycle_allows_full_graph_disagreement_with_newer_evidence(tmp_path):
+    event_log = tmp_path / "events.jsonl"
+    cfg = {
+        "portfolio_advisor_dir": str(tmp_path / "pa"),
+        "event_log_path": str(event_log),
+    }
+    event_log.write_text(
+        (
+            '{"timestamp":"2026-05-15T09:00:00+00:00","ticker":"NVDA",'
+            '"event_type":"full_graph_decision","key_data":{'
+            '"decision_id":"dec1","trade_date":"2026-05-15","rating":"Hold",'
+            '"confidence":"Medium","summary":"Hold; evidence balanced.",'
+            '"thesis":"Balanced thesis."},"outcome":null}\n'
+            '{"timestamp":"2026-05-15T12:00:00+00:00","ticker":"NVDA",'
+            '"event_type":"single_model_analysis","key_data":{"job_type":"thesis_check",'
+            '"excerpt":"Trim; new margin warning changed the thesis."},"outcome":null}\n'
+        ),
+        encoding="utf-8",
+    )
+    fake = AdvisorPMCycleResult(
+        executive_summary="Trim NVDA.",
+        stances=[
+            AdvisorPMTickerStance(
+                ticker="NVDA",
+                stance="trim",
+                rationale="New margin warning.",
+                evidence_refs=["event:single_model_analysis:NVDA:2026-05-15"],
+            )
+        ],
+    )
+    m_struct = MagicMock()
+    m_struct.invoke.return_value = fake
+    m_llm = MagicMock()
+    m_client = MagicMock()
+    m_client.get_llm.return_value = m_llm
+
+    with patch("tradingagents.portfolio_advisor.advisor_pm.etoro_scan.fetch_portfolio_rows") as fetch:
+        fetch.return_value = ({}, "portfolio text here", ["NVDA"], [])
+        with patch("tradingagents.portfolio_advisor.advisor_pm.create_llm_client", return_value=m_client):
+            with patch("tradingagents.portfolio_advisor.advisor_pm.bind_structured", return_value=m_struct):
+                with patch("tradingagents.portfolio_advisor.messaging.send_advisor_message"):
+                    out = run_pm_cycle(cfg, trigger="test_trigger")
+
+    assert out.stances[0].stance == "trim"
+    assert not out.append_jobs
+
+
+def test_run_pm_cycle_uses_candidate_comparisons_for_non_held_candidate(tmp_path):
+    cfg = {"portfolio_advisor_dir": str(tmp_path / "pa"), "event_log_path": str(tmp_path / "events.jsonl")}
+    fake = AdvisorPMCycleResult(
+        executive_summary="ASML is interesting but compare it rather than treating it as held.",
+        stances=[AdvisorPMTickerStance(ticker="ASML", stance="buy", rationale="Candidate looks strong.")],
+        candidate_comparisons=[
+            AdvisorPMCandidateComparison(
+                candidate_ticker="ASML",
+                better_than_current_holding="unknown",
+                replace_or_add="watch",
+                compared_against=["NVDA", "ASML"],
+                rationale="Needs comparison against current semis.",
+                evidence_refs=["candidate:ASML"],
+            )
+        ],
+    )
+    m_struct = MagicMock()
+    m_struct.invoke.return_value = fake
+    m_llm = MagicMock()
+    m_client = MagicMock()
+    m_client.get_llm.return_value = m_llm
+
+    with patch("tradingagents.portfolio_advisor.advisor_pm.etoro_scan.fetch_portfolio_rows") as fetch:
+        fetch.return_value = ({}, "portfolio text here", ["NVDA"], [])
+        with patch("tradingagents.portfolio_advisor.advisor_pm.create_llm_client", return_value=m_client):
+            with patch("tradingagents.portfolio_advisor.advisor_pm.bind_structured", return_value=m_struct):
+                out = run_pm_cycle(
+                    cfg,
+                    trigger="candidate_comparison",
+                    extra_context="Candidate comparison request:\n- ASML",
+                )
+
+    assert out.stances[0].stance == "unknown"
+    assert "not in the live portfolio" in out.stances[0].rationale
+    assert out.candidate_comparisons[0].candidate_ticker == "ASML"
+    assert out.candidate_comparisons[0].compared_against == ["NVDA"]
+    rows = load_recent_pm_cycles(cfg, limit=1)
+    assert any(o["action"] == "downgraded_non_live_ticker" for o in rows[0]["validation_overrides"])
+
+
+def test_append_pm_memory_writes_candidate_comparisons(tmp_path):
+    cfg = {"portfolio_advisor_dir": str(tmp_path / "pa"), "portfolio_advisor_pm_unified_memory": False}
+    res = AdvisorPMCycleResult(
+        executive_summary="memo",
+        candidate_comparisons=[
+            AdvisorPMCandidateComparison(
+                candidate_ticker="ASML",
+                better_than_current_holding="yes",
+                replace_or_add="add",
+                compared_against=["NVDA"],
+                rationale="Diversifies semis.",
+            )
+        ],
+    )
+
+    _append_pm_memory_md(cfg, trigger="candidate_comparison", result=res)
+
+    text = pm_memory_path(cfg).read_text(encoding="utf-8")
+    assert "Candidate comparisons" in text
+    assert "ASML" in text
+    assert "better_than_current_holding=yes" in text
 
 
 def test_optional_pm_after_bootstrap_calls_run_pm_cycle(tmp_path):
@@ -158,6 +422,55 @@ def test_apply_pm_followups_append_jobs(tmp_path):
     assert len(pend) == 1
     assert pend[0]["ticker"] == "NVDA"
     assert pend[0]["flags"] == ["PM_APPEND"]
+    assert pend[0]["source"] == "pm_followup"
+    assert pend[0]["evidence_question"] == "pm"
+
+
+def test_apply_pm_followups_dedupes_matching_pending_job(tmp_path):
+    cfg = {
+        "portfolio_advisor_dir": str(tmp_path / "pa"),
+        "portfolio_advisor_pm_apply_actions": True,
+    }
+    from tradingagents.portfolio_advisor import state as pa_state
+
+    st = pa_state.default_state()
+    st["jobs"] = [
+        {
+            "id": "existing1",
+            "ticker": "NVDA",
+            "scheduled_at": "2026-05-16T09:00:00+00:00",
+            "kind": "deep_research",
+            "reason": "Check margins",
+            "status": "pending",
+            "execution_tier": "single_model",
+            "job_type": "thesis_check",
+            "source": "planner",
+            "evidence_question": "Check margins",
+        }
+    ]
+    pa_state.save_state(cfg, st)
+    res = AdvisorPMCycleResult(
+        executive_summary="x",
+        append_jobs=[
+            AdvisorPMAppendJob(
+                ticker="NVDA",
+                execution_tier="single_model",
+                job_type="thesis_check",
+                rationale="Check margins",
+                evidence_question="Check margins",
+                source="pm_missing_evidence",
+            ),
+        ],
+    )
+    with patch("tradingagents.portfolio_advisor.advisor_pm.etoro_scan.fetch_portfolio_rows") as fetch:
+        fetch.return_value = ({}, "t", ["NVDA"], [])
+        out = apply_pm_cycle_followups(cfg, res)
+
+    assert out["jobs_appended"] == 0
+    assert out["jobs_deduped"][0]["existing_job_id"] == "existing1"
+    st2 = pa_state.load_state(cfg)
+    pend = [j for j in st2.get("jobs") or [] if j.get("status") == "pending"]
+    assert len(pend) == 1
 
 
 def test_apply_pm_followups_disabled_skips_side_effects(tmp_path):
