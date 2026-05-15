@@ -293,7 +293,7 @@ def _save_job_outcome(cfg: Dict[str, Any], jid: str, status: str, error: Optiona
     with _state_lock:
         st = state.load_state(cfg)
         for j in st.get("jobs", []):
-            if j.get("id") == jid:
+            if j.get("id") == jid and j.get("status") in ("pending", "in_progress"):
                 j["status"] = status
                 j["completed_at"] = _utc_now().isoformat()
                 if error:
@@ -394,6 +394,22 @@ def run_due_jobs(cfg: Dict[str, Any]) -> int:
 
     if not due:
         return 0
+
+    # Deduplicate: one job per ticker (take the oldest due)
+    seen_tickers: set = set()
+    deduped: List[Dict[str, Any]] = []
+    for j in due:
+        tid = str(j.get("ticker") or "").strip().upper()
+        if tid and tid not in seen_tickers:
+            seen_tickers.add(tid)
+            deduped.append(j)
+    due = deduped[:max_run]
+
+    # Claim all jobs immediately so concurrent cron ticks don't re-pick them
+    with _state_lock:
+        st2 = state.load_state(cfg)
+        state.claim_jobs_for_run(st2, [j.get("id") for j in due])
+        state.save_state(cfg, st2)
 
     trade_date = date.today().isoformat()
     job_results: List[Dict[str, Any]] = []

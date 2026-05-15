@@ -81,6 +81,13 @@ def list_pending_jobs(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [j for j in jobs if isinstance(j, dict) and j.get("status") == "pending"]
 
 
+def claim_jobs_for_run(state: Dict[str, Any], job_ids: List[str]) -> None:
+    """Mark jobs as in_progress so concurrent cron ticks don't double-run them."""
+    for j in state.get("jobs") or []:
+        if j.get("id") in job_ids and j.get("status") == "pending":
+            j["status"] = "in_progress"
+
+
 def cancel_job(state: Dict[str, Any], job_id: str, reason: str = "") -> bool:
     jobs: List[Dict[str, Any]] = state.get("jobs") or []
     for j in jobs:
