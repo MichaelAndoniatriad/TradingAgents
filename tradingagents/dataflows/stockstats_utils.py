@@ -1,6 +1,7 @@
 import time
 import logging
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 from yfinance.exceptions import YFRateLimitError
@@ -32,7 +33,28 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
                 raise
 
 
-def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
+def _warn_trading_halt_gaps(data: pd.DataFrame, symbol: str) -> None:
+    """Log a warning for any consecutive-row gap larger than 1 trading day.
+
+    Uses numpy.busday_count to count business days between consecutive dates,
+    which excludes weekends but not market holidays. A gap of 2+ business days
+    between consecutive data rows suggests a trading halt or data outage.
+    """
+    if data.empty or "Date" not in data.columns:
+        return
+    dates = data["Date"].dropna().sort_values().dt.date.tolist()
+    for i in range(1, len(dates)):
+        gap = int(np.busday_count(dates[i - 1], dates[i]))
+        if gap > 1:
+            logger.warning(
+                "Possible trading halt detected for %s: %d-day gap ending %s",
+                symbol,
+                gap,
+                dates[i],
+            )
+
+
+def _clean_dataframe(data: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
     """Normalize a stock DataFrame for stockstats: parse dates, drop invalid rows, fill price gaps."""
     data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
     data = data.dropna(subset=["Date"])
@@ -40,6 +62,9 @@ def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     price_cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in data.columns]
     data[price_cols] = data[price_cols].apply(pd.to_numeric, errors="coerce")
     data = data.dropna(subset=["Close"])
+
+    _warn_trading_halt_gaps(data, symbol)
+
     data[price_cols] = data[price_cols].ffill().bfill()
 
     return data
@@ -94,7 +119,7 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
         data = data.reset_index()
         data.to_csv(data_file, index=False, encoding="utf-8")
 
-    data = _clean_dataframe(data)
+    data = _clean_dataframe(data, symbol=symbol)
 
     # Filter to curr_date to prevent look-ahead bias in backtesting
     data = data[data["Date"] <= curr_date_dt]

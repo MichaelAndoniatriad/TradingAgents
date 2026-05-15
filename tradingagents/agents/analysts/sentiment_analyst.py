@@ -19,6 +19,8 @@ turn 0. The LLM produces the sentiment report in a single invocation.
 See: https://github.com/TauricResearch/TradingAgents/issues/557
 """
 
+import logging
+import re
 from datetime import datetime, timedelta
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -30,6 +32,63 @@ from tradingagents.agents.utils.agent_utils import (
 )
 from tradingagents.dataflows.reddit import fetch_reddit_posts
 from tradingagents.dataflows.stocktwits import fetch_stocktwits_messages
+
+logger = logging.getLogger(__name__)
+
+_POSITIVE_WORDS = frozenset([
+    "bullish", "positive", "growth", "beat", "beats", "strong", "record",
+    "surge", "rally", "upgrade", "outperform", "exceeds", "raised", "higher",
+])
+_NEGATIVE_WORDS = frozenset([
+    "bearish", "negative", "miss", "decline", "weak", "loss", "cuts",
+    "downgrade", "underperform", "disappoints", "lowered", "lower", "risk",
+    "concern", "warning", "halt", "sell",
+])
+
+
+def _parse_stocktwits_bullish_pct(stocktwits_block: str) -> float | None:
+    """Extract the bullish percentage from the StockTwits summary line.
+
+    Returns the float percentage (0–100) or None if not parseable.
+    """
+    m = re.search(r"Bullish:\s*\d+\s*\((\d+)%\)", stocktwits_block)
+    if m:
+        return float(m.group(1))
+    return None
+
+
+def _parse_news_negative_pct(news_block: str) -> float | None:
+    """Estimate the negative-leaning fraction of a news block via keyword counting.
+
+    Returns the fraction of total (positive + negative) keyword hits that are
+    negative, as a percentage (0–100), or None if no keywords were found.
+    """
+    words = re.findall(r"[a-z]+", news_block.lower())
+    pos = sum(1 for w in words if w in _POSITIVE_WORDS)
+    neg = sum(1 for w in words if w in _NEGATIVE_WORDS)
+    total = pos + neg
+    if total == 0:
+        return None
+    return round(100 * neg / total)
+
+
+def _divergence_alert(stocktwits_block: str, news_block: str) -> str:
+    """Return a [DIVERGENCE ALERT] prefix line when retail and news sentiment diverge.
+
+    Fires when StockTwits retail sentiment is strongly bullish (>75%) while
+    news keyword sentiment is predominantly negative (>60%).
+    """
+    retail_pct = _parse_stocktwits_bullish_pct(stocktwits_block)
+    news_neg_pct = _parse_news_negative_pct(news_block)
+    if retail_pct is not None and news_neg_pct is not None:
+        if retail_pct > 75 and news_neg_pct > 60:
+            return (
+                f"[DIVERGENCE ALERT] ALERT: Retail sentiment is strongly bullish "
+                f"({retail_pct:.0f}%) while news sentiment appears negative "
+                f"(negative keyword ratio: {news_neg_pct:.0f}%). "
+                "Investigate this divergence carefully.\n\n"
+            )
+    return ""
 
 
 def _seven_days_back(trade_date: str) -> str:
@@ -57,6 +116,7 @@ def create_sentiment_analyst(llm):
         stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
         reddit_block = fetch_reddit_posts(ticker)
 
+        alert_prefix = _divergence_alert(stocktwits_block, news_block)
         system_message = _build_system_message(
             ticker=ticker,
             start_date=start_date,
@@ -64,6 +124,7 @@ def create_sentiment_analyst(llm):
             news_block=news_block,
             stocktwits_block=stocktwits_block,
             reddit_block=reddit_block,
+            alert_prefix=alert_prefix,
         )
 
         prompt = ChatPromptTemplate.from_messages(
@@ -89,6 +150,12 @@ def create_sentiment_analyst(llm):
         chain = prompt | llm
         result = chain.invoke(state["messages"])
 
+        if len(result.content) < 100:
+            logger.warning(
+                "sentiment_analyst returned no tool calls for %s — report may be empty",
+                ticker,
+            )
+
         return {
             "messages": [result],
             "sentiment_report": result.content,
@@ -105,9 +172,10 @@ def _build_system_message(
     news_block: str,
     stocktwits_block: str,
     reddit_block: str,
+    alert_prefix: str = "",
 ) -> str:
     """Assemble the sentiment-analyst system message with structured data blocks."""
-    return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
+    return f"""{alert_prefix}You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
 
 ## Data sources (pre-fetched, in this prompt)
 

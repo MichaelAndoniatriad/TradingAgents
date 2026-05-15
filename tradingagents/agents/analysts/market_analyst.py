@@ -1,3 +1,5 @@
+import logging
+
 from langchain_core.messages import SystemMessage
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
@@ -8,6 +10,8 @@ from tradingagents.agents.utils.agent_utils import (
     get_stock_summary,
 )
 from tradingagents.dataflows.config import get_config
+
+logger = logging.getLogger(__name__)
 
 
 def create_market_analyst(llm):
@@ -54,9 +58,6 @@ Volatility Indicators:
 - boll_lb: Bollinger Lower Band: Typically 2 standard deviations below the middle line. Usage: Indicates potential oversold conditions. Tips: Use additional analysis to avoid false reversal signals.
 - atr: ATR: Averages true range to measure volatility. Usage: Set stop-loss levels and adjust position sizes based on current market volatility. Tips: It's a reactive measure, so use it as part of a broader risk management strategy.
 
-Volume-Based Indicators:
-- vwma: VWMA: A moving average weighted by volume. Usage: Confirm trends by integrating price action with volume data. Tips: Watch for skewed results from volume spikes; use in combination with other volume analyses.
-
 - Select indicators that provide diverse and complementary information. Avoid redundancy (e.g., do not select both rsi and stochrsi). Also briefly explain why they are suitable for the given market context. When you tool call, please use the exact name of the indicators provided above as they are defined parameters, otherwise your call will fail. Start by calling get_stock_summary to get the price context and recent OHLCV needed to orient your analysis. Then use get_indicators with the specific indicator names. Only call get_stock_data if you need the full multi-year price history for a specific reason. Write a very detailed and nuanced report of the trends you observe. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
             + " Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."
             + get_investor_policy_analyst_supplement()
@@ -77,6 +78,11 @@ Volume-Based Indicators:
 
         if len(result.tool_calls) == 0:
             report = result.content
+            if len(report) < 100:
+                logger.warning(
+                    "market_analyst returned no tool calls for %s — report may be empty",
+                    state["company_of_interest"],
+                )
 
         return {
             "messages": [result],

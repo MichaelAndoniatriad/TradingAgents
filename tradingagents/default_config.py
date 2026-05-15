@@ -62,6 +62,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_PLANNER_CATALYST_CHARS": "portfolio_advisor_planner_catalyst_chars",
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_POST_VERDICT_PORTFOLIO_CHARS": "portfolio_advisor_post_verdict_portfolio_chars",
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_WEEKLY_LLM_DIGEST_CHARS": "portfolio_advisor_weekly_llm_digest_chars",
+    "TRADINGAGENTS_MIN_REDDIT_UPVOTES": "min_reddit_upvotes",
     "TRADINGAGENTS_ANALYSIS_EMAIL_TO": "analysis_email_to",
     "TRADINGAGENTS_ANALYSIS_EMAIL_FROM": "analysis_email_from",
     "TRADINGAGENTS_SMTP_HOST": "smtp_host",
@@ -288,6 +289,8 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "ECB Bank of England BOJ central bank policy",
         "oil commodities supply chain energy",
     ],
+    # Reddit signal quality filter: posts below this upvote threshold are dropped.
+    "min_reddit_upvotes": 20,
     # Data vendor configuration
     # Category-level configuration (default for all tools in category)
     "data_vendors": {
