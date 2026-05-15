@@ -257,8 +257,9 @@ def run_single_model_analysis(
         n_same=int(cfg.get("memory_context_max_same_ticker") or 5),
         n_cross=int(cfg.get("memory_context_max_cross_ticker") or 2),
         lookback_days=lookback,
+        compact=True,
     )
-    ev_ctx = format_recent_events_for_ticker(cfg, sym, days=ev_days, max_events=20)
+    ev_ctx = format_recent_events_for_ticker(cfg, sym, days=ev_days, max_events=20, compact=True)
 
     today = date.today().isoformat()
 

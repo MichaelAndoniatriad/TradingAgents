@@ -90,6 +90,17 @@ def _event_day(row: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+_COMPACT_EVENT_TYPES = frozenset(
+    {"full_graph_decision", "single_model_analysis", "outcome_recorded"}
+)
+
+_COMPACT_ET_ALIAS = {
+    "full_graph_decision": "deep",
+    "single_model_analysis": "quick",
+    "outcome_recorded": "outcome",
+}
+
+
 def format_recent_events_for_ticker(
     cfg: Dict[str, Any],
     ticker: str,
@@ -98,12 +109,15 @@ def format_recent_events_for_ticker(
     max_events: int = 25,
     min_include: Optional[List[str]] = None,
     min_include_n: int = 1,
+    compact: bool = False,
 ) -> str:
     """Human-readable tail for prompt injection (no LLM).
 
     Rows are sorted by severity weight then recency, then capped at ``max_events``.
     Types listed in ``min_include`` contribute their latest ``min_include_n`` rows
     even when older than the lookback window.
+    When ``compact`` is True, only key event types are included and each row is
+    formatted as a single line with ticker, verdict, date, and outcome only.
     """
     sym = ticker.strip().upper()
     if not sym:
@@ -167,6 +181,25 @@ def format_recent_events_for_ticker(
     rows = merged[: int(max_events)]
     if not rows:
         return ""
+
+    if compact:
+        compact_rows = [r for r in rows if str(r.get("event_type") or "") in _COMPACT_EVENT_TYPES]
+        if not compact_rows:
+            return ""
+        lines = [f"Recent events for {sym} (compact):"]
+        for r in compact_rows:
+            et = str(r.get("event_type") or "")
+            alias = _COMPACT_ET_ALIAS.get(et, et)
+            kd = r.get("key_data") or {}
+            if et == "outcome_recorded":
+                pnl = kd.get("pnl_pct")
+                align = str(r.get("outcome") or kd.get("outcome_alignment") or "?")
+                verdict = f"align={align}" + (f" pnl={float(pnl):+.1f}%" if pnl is not None else "")
+            else:
+                verdict = str(kd.get("excerpt") or "").replace("\n", " ").strip()[:80]
+            lines.append(f"{str(r.get('timestamp') or '')[:10]} | {alias} | {verdict}")
+        return "\n".join(lines)
+
     lines = [f"Recent event log for {sym} (weighted tail, cap {max_events}):"]
     for r in rows:
         et = r.get("event_type", "?")

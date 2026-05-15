@@ -76,11 +76,13 @@ class TradingMemoryLog:
         n_cross: int = 3,
         *,
         lookback_days: Optional[int] = None,
+        compact: bool = False,
     ) -> str:
         """Return formatted past context string for agent prompt injection.
 
         When ``lookback_days`` is set, only entries whose tag date is on or after
         (today minus that many calendar days) are considered.
+        When ``compact`` is True, each entry is compressed to a single line.
         """
         entries = [e for e in self.load_entries() if not e.get("pending")]
         if not entries:
@@ -146,12 +148,14 @@ class TradingMemoryLog:
             return ""
 
         parts = []
+        fmt_same = self._format_oneliner if compact else self._format_full
+        fmt_cross = self._format_oneliner if compact else self._format_reflection_only
         if same:
             parts.append(f"Past analyses of {ticker} (most recent first):")
-            parts.extend(self._format_full(e) for e in same)
+            parts.extend(fmt_same(e) for e in same)
         if cross:
             parts.append("Recent cross-ticker lessons:")
-            parts.extend(self._format_reflection_only(e) for e in cross)
+            parts.extend(fmt_cross(e) for e in cross)
         return "\n\n".join(parts)
 
     # --- Update path (Phase B) ---
@@ -339,6 +343,14 @@ class TradingMemoryLog:
         entry["decision"] = decision_match.group(1).strip() if decision_match else ""
         entry["reflection"] = reflection_match.group(1).strip() if reflection_match else ""
         return entry
+
+    def _format_oneliner(self, e: dict) -> str:
+        date = str(e.get("date") or "")[:10]
+        ticker = e.get("ticker") or ""
+        rating = e.get("rating") or ""
+        snip = (e.get("decision") or "").replace("\n", " ").strip()[:60]
+        outcome = "pending" if e.get("pending") else (e.get("raw") or "n/a")
+        return f"[{date}] {ticker} | {rating} | thesis: {snip} | outcome: {outcome}"
 
     def _format_full(self, e: dict) -> str:
         raw = e["raw"] or "n/a"

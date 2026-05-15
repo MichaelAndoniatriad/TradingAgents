@@ -161,45 +161,74 @@ def pm_memory_path(cfg: Dict[str, Any]) -> Path:
     return state.advisor_dir(cfg) / "pm_memory.md"
 
 
-def _trading_memory_tail_for_pm(cfg: Dict[str, Any]) -> str:
-    """Recent tail of LangGraph trading memory for PM prompt (unified mode only)."""
-    if not _pm_unified_memory(cfg):
-        return ""
-    raw = cfg.get("memory_log_path")
-    if not (isinstance(raw, str) and raw.strip()):
-        return "(memory_log_path not set.)"
-    try:
-        mx = int(cfg.get("portfolio_advisor_pm_trading_memory_prompt_chars") or 6000)
-    except (TypeError, ValueError):
-        mx = 6000
-    mx = max(400, min(mx, 50000))
-    path = Path(raw).expanduser()
-    if not path.is_file():
-        return "(trading memory file not created yet.)"
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as e:
-        return f"(could not read trading memory file: {e})"
-    tail = text[-mx:] if len(text) > mx else text
-    s = tail.strip()
-    return s if s else "(empty)"
+def _compact_portfolio_snapshot(portfolio_text: str, rows: List[Dict[str, Any]]) -> str:
+    """Build compact portfolio summary from raw eToro rows. Target: under 800 chars."""
+    first_line = (portfolio_text or "").split("\n")[0].strip()
+    if not rows:
+        return first_line or "(portfolio empty)"
+    ubv_vals = [float(r["unitsBaseValueDollars"]) for r in rows if r.get("unitsBaseValueDollars") is not None]
+    total_ubv = sum(ubv_vals) if ubv_vals else None
+    items = []
+    for r in rows:
+        ticker = str(r.get("symbolFull") or "?").strip()
+        side = "L" if r.get("isBuy") is True else ("S" if r.get("isBuy") is False else "?")
+        item: Dict[str, Any] = {"t": ticker, "side": side}
+        ubv = r.get("unitsBaseValueDollars")
+        if ubv is not None and total_ubv:
+            item["pct"] = round(float(ubv) / total_ubv * 100, 1)
+        init = r.get("initialAmountInDollars")
+        upnl = r.get("unrealizedPnL")
+        if upnl is not None and init is not None and float(init) != 0:
+            item["upnl%"] = round(float(upnl) / float(init) * 100, 1)
+        items.append(item)
+    body = json.dumps(items, separators=(",", ":"), ensure_ascii=False)
+    return f"{first_line}\n{body}"
 
 
-def _trading_memory_prompt_block(cfg: Dict[str, Any]) -> str:
-    """Omit the whole section when unified memory has nothing substantive (saves prompt tokens)."""
+def _trading_memory_digest_block(cfg: Dict[str, Any]) -> str:
+    """3-line activity digest from the event log instead of raw memory tail."""
     if not _pm_unified_memory(cfg):
         return ""
-    tail = _trading_memory_tail_for_pm(cfg)
-    if tail in (
-        "(memory_log_path not set.)",
-        "(trading memory file not created yet.)",
-        "(empty)",
-    ) or tail.startswith("(could not read trading memory file"):
+    try:
+        from tradingagents.agents.utils.event_log import _iter_events
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        fg_n = sm_n = 0
+        last_action: Optional[str] = None
+        last_ts = ""
+        outcomes: List[str] = []
+        for row in _iter_events(cfg, max_lines=5000):
+            ts = str(row.get("timestamp") or "")
+            if ts < cutoff:
+                continue
+            et = str(row.get("event_type") or "")
+            ticker = str(row.get("ticker") or "").strip().upper()
+            kd = row.get("key_data") or {}
+            if et == "full_graph_decision":
+                fg_n += 1
+                if ts > last_ts:
+                    last_ts = ts
+                    excerpt = str(kd.get("excerpt") or "").replace("\n", " ")[:40].strip()
+                    last_action = f"{ticker} deep ({ts[:10]}): {excerpt}"
+            elif et == "single_model_analysis":
+                sm_n += 1
+                if ts > last_ts:
+                    last_ts = ts
+                    jt = str(kd.get("job_type") or "").strip()
+                    last_action = f"{ticker} {jt} ({ts[:10]})"
+            elif et == "outcome_recorded":
+                pnl = kd.get("pnl_pct")
+                if pnl is not None and len(outcomes) < 4:
+                    outcomes.append(f"{ticker} {float(pnl):+.1f}%")
+        if fg_n == 0 and sm_n == 0 and not last_action and not outcomes:
+            return ""
+        line1 = f"Last 30 days: {fg_n} full_graph runs, {sm_n} single_model runs."
+        line2 = f"Last action: {last_action}." if last_action else "Last action: none recorded."
+        line3 = f"Recent outcomes: {', '.join(outcomes)}." if outcomes else "Recent outcomes: none recorded."
+        return f"Recent research activity:\n{line1}\n{line2}\n{line3}\n\n"
+    except Exception as e:
+        logger.debug("_trading_memory_digest_block failed: %s", e)
         return ""
-    return (
-        "LangGraph trading memory log (recent tail; same file as PM markdown when unified):\n"
-        f"{tail}\n\n"
-    )
 
 
 def _recent_analysis_block(cfg: Dict[str, Any], tickers: List[str]) -> str:
@@ -350,11 +379,28 @@ def _append_pm_memory_md(
             f.write(block)
 
 
-def _prior_pm_context(cfg: Dict[str, Any]) -> str:
+def _prior_pm_context(cfg: Dict[str, Any], *, current_tickers: Optional[set] = None) -> str:
     n = _pm_int(cfg, "portfolio_advisor_pm_prior_cycles", 2, 0, 8)
     if n <= 0:
         return ""
     prev = load_recent_pm_cycles(cfg, limit=n)
+    if not prev:
+        return ""
+    # Skip prior cycles whose stance ticker set exactly matches the current portfolio —
+    # their context is redundant since we're about to review the same holdings again.
+    if current_tickers is not None:
+        cur_set = {t.strip().upper() for t in current_tickers if str(t).strip()}
+        filtered = []
+        for row in prev:
+            r = row.get("result") or {}
+            stance_tickers = {
+                str(s.get("ticker") or "").strip().upper()
+                for s in (r.get("stances") or [])
+                if s.get("ticker")
+            }
+            if stance_tickers != cur_set:
+                filtered.append(row)
+        prev = filtered
     if not prev:
         return ""
     ex_cap = _pm_int(cfg, "portfolio_advisor_pm_prior_executive_chars", 450, 80, 4000)
@@ -714,9 +760,11 @@ def run_pm_cycle(
     pm_claude = _read_pm_claude_md(cfg)
     pm_memory = _read_pm_memory_structured(cfg)
 
-    _payload, portfolio_text, tickers, _rows = etoro_scan.fetch_portfolio_rows()
+    _payload, portfolio_text, tickers, portfolio_rows = etoro_scan.fetch_portfolio_rows()
     if not tickers:
         raise RuntimeError("No tickers in eToro portfolio export.")
+
+    live_tickers = etoro_scan.current_ticker_set(tickers)
 
     st = state.load_state(cfg)
     summ = st.get("last_bootstrap_summary")
@@ -744,14 +792,13 @@ def run_pm_cycle(
     provider = _pm_provider(cfg, model)
     base = cfg.get("corporate_openrouter_base_url") or cfg.get("backend_url")
 
-    snap_max = _pm_int(cfg, "portfolio_advisor_pm_portfolio_snapshot_chars", 7000, 1000, 50000)
-    portfolio_excerpt = (portfolio_text or "")[:snap_max]
+    portfolio_snapshot = _compact_portfolio_snapshot(portfolio_text, portfolio_rows)
     extra_cap = _pm_int(cfg, "portfolio_advisor_pm_extra_context_chars", 3200, 0, 20000)
     extra_excerpt = (extra_context or "").strip()[:extra_cap] if extra_cap > 0 else ""
 
-    prior_txt = _prior_pm_context(cfg)
+    prior_txt = _prior_pm_context(cfg, current_tickers=live_tickers)
     prior_block = f"Prior PM context (most recent cycles):\n{prior_txt}\n\n" if prior_txt else ""
-    tm_block = _trading_memory_prompt_block(cfg)
+    tm_block = _trading_memory_digest_block(cfg)
     claude_block = f"{pm_claude}\n\n" if pm_claude else ""
     memory_block = f"Your working memory (PM_MEMORY.md — recent notes to self):\n{pm_memory}\n\n" if pm_memory else ""
 
@@ -763,10 +810,10 @@ Execution tiers (for append_jobs only): "full_graph" runs the full multi-agent p
 
 Trigger for this cycle: {trigger_s}
 
-{memory_block}Portfolio snapshot (truncated):
-{portfolio_excerpt}
+{memory_block}Portfolio snapshot:
+{portfolio_snapshot}
 
-Live tickers (normalized): {", ".join(sorted(etoro_scan.current_ticker_set(tickers)))}
+Live tickers (normalized): {", ".join(sorted(live_tickers))}
 
 Pending advisor jobs preview (JSON):
 {pend_preview}
