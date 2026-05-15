@@ -20,6 +20,7 @@ from tradingagents.agents.utils.event_log import append_event
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.agents.utils.structured import bind_structured
 from tradingagents.dataflows.config import set_config
+from tradingagents.integrations.etoro.clerk_bridge import _normalize_ticker
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.portfolio_advisor import etoro_scan, evidence, state
 from tradingagents.portfolio_advisor.models import AdvisorPMAppendJob, AdvisorPMCycleResult
@@ -75,6 +76,9 @@ You are the Portfolio Manager (PM) for a personal investment portfolio.
 ## When answering /ask questions via ntfy
 - Answer directly. Verdict first, reasoning after.
 - Stick to facts present in the portfolio snapshot, pending jobs, and memory. Do not extrapolate rules.
+- If you recommend closing or trimming, name the exact ticker, lot count, share/unit count, dollar value, and
+  open prices from the portfolio snapshot. Do not say "close something" or "reduce exposure" without saying
+  exactly which open positions the human should close.
 - Keep replies under 600 characters; the human reads them on a phone.
 
 ## When the human asks to run jobs sooner or immediately
@@ -221,6 +225,94 @@ def _compact_portfolio_snapshot(portfolio_text: str, rows: List[Dict[str, Any]])
     total_line = f"total_portfolio_value_usd={round(total_ubv, 2)}" if total_ubv else ""
     body = json.dumps(items, separators=(",", ":"), ensure_ascii=False)
     return f"{first_line}\n{total_line}\n{body}"
+
+
+def _float_or_none(v: Any) -> Optional[float]:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _money(v: Any) -> str:
+    fv = _float_or_none(v)
+    if fv is None:
+        return "unknown value"
+    return f"${fv:,.0f}" if abs(fv) >= 100 else f"${fv:,.2f}"
+
+
+def _num(v: Any, digits: int = 4) -> str:
+    fv = _float_or_none(v)
+    if fv is None:
+        return "?"
+    s = f"{fv:.{digits}f}".rstrip("0").rstrip(".")
+    return s or "0"
+
+
+def _rows_for_ticker(rows: List[Dict[str, Any]], ticker: str) -> List[Dict[str, Any]]:
+    want = _normalize_ticker(ticker)
+    return [r for r in rows or [] if _normalize_ticker(str(r.get("symbolFull") or "")) == want]
+
+
+def _mentioned_open_rates(text: str) -> set[str]:
+    rates: set[str] = set()
+    for raw in re.findall(r"(?<!\d)(?:\$)?(\d{1,4}(?:\.\d{1,4})?)(?!\d)", text or ""):
+        try:
+            rates.add(f"{float(raw):.4f}".rstrip("0").rstrip("."))
+        except ValueError:
+            continue
+    return rates
+
+
+def _format_close_instruction(ticker: str, stance: str, rationale: str, rows: List[Dict[str, Any]]) -> str:
+    """Turn a sell/trim stance into exact lot-level instructions from the live book."""
+    lots = _rows_for_ticker(rows, ticker)
+    if not lots:
+        return "No live eToro lots found for this ticker; verify manually before doing anything."
+
+    mentioned = _mentioned_open_rates(rationale)
+    selected = []
+    if mentioned:
+        for lot in lots:
+            op = _float_or_none(lot.get("openRate"))
+            op_s = f"{op:.4f}".rstrip("0").rstrip(".") if op is not None else ""
+            if op_s in mentioned:
+                selected.append(lot)
+    if not selected and stance == "sell":
+        selected = lots
+
+    total_units = sum((_float_or_none(l.get("units")) or 0.0) for l in selected)
+    total_value = sum((_float_or_none(l.get("unitsBaseValueDollars")) or 0.0) for l in selected)
+
+    if stance == "sell":
+        header = (
+            f"Close {len(selected)} {ticker} position(s): {_num(total_units)} units, about {_money(total_value)}."
+        )
+    else:
+        if not selected:
+            lot_count = len(lots)
+            total_all_units = sum((_float_or_none(l.get("units")) or 0.0) for l in lots)
+            total_all_value = sum((_float_or_none(l.get("unitsBaseValueDollars")) or 0.0) for l in lots)
+            return (
+                f"Trim requested but no exact lots/amount were specified. Open {ticker} lots: "
+                f"{lot_count} position(s), {_num(total_all_units)} units, about {_money(total_all_value)}. "
+                "Ask PM for exact trim size before executing."
+            )
+        header = (
+            f"Trim by closing these {len(selected)} {ticker} lot(s): {_num(total_units)} units, about {_money(total_value)}."
+        )
+
+    details = []
+    for lot in selected[:8]:
+        pid = lot.get("positionId")
+        pid_s = f"id {pid}, " if pid not in (None, "") else ""
+        details.append(
+            f"{pid_s}{_num(lot.get('units'))} units opened at {_money(lot.get('openRate'))}, "
+            f"value {_money(lot.get('unitsBaseValueDollars'))}, P/L {_money(lot.get('unrealizedPnL'))}"
+        )
+    if len(selected) > 8:
+        details.append(f"... plus {len(selected) - 8} more lot(s)")
+    return header + " " + " | ".join(details)
 
 
 def _trading_memory_digest_block(cfg: Dict[str, Any]) -> str:
@@ -1099,7 +1191,7 @@ def _trigger_run_due_async() -> None:
         logger.warning("Failed to trigger async run-due: %s", e)
 
 
-def _notify_action_stances(cfg: Dict[str, Any], result: AdvisorPMCycleResult) -> None:
+def _notify_action_stances(cfg: Dict[str, Any], result: AdvisorPMCycleResult, portfolio_rows: List[Dict[str, Any]]) -> None:
     """Update action log from PM stances; push alert for new/changed sell/trim. Silent on error."""
     try:
         from tradingagents.portfolio_advisor import messaging
@@ -1113,8 +1205,16 @@ def _notify_action_stances(cfg: Dict[str, Any], result: AdvisorPMCycleResult) ->
             return
         lines = []
         for s in action_stances:
-            upsert_action(cfg, s.ticker, s.stance, (s.rationale or "").strip(), source="pm_cycle")
-            lines.append(f"{s.ticker} {s.stance.upper()}: {(s.rationale or '').strip()[:120]}")
+            rationale = (s.rationale or "").strip()
+            action_status = upsert_action(cfg, s.ticker, s.stance, rationale, source="pm_cycle")
+            if action_status == "unchanged":
+                continue
+            instruction = _format_close_instruction(s.ticker, s.stance, rationale, portfolio_rows)
+            lines.append(
+                f"{s.ticker} {s.stance.upper()}: {instruction}\nReason: {rationale[:180]}"
+            )
+        if not lines:
+            return
         body = "Action required:\n" + "\n".join(lines)
         messaging.send_advisor_message(cfg, "Action required", body)
     except Exception as e:
@@ -1240,12 +1340,15 @@ Structured output fields (use defaults when unsure):
 - push_note: one short observation worth pushing to the human right now — deadline approaching, unexpected finding,
   stance change, catalyst within 48h. Max 280 chars. Leave empty if nothing urgent or new. This goes straight
   to the human's phone, so only fill it when you genuinely have something they need to know unprompted.
+  Do not repeat the same action already present in prior PM context unless the exact required close list changed.
 
 IMPORTANT — position sizing: the portfolio snapshot above includes val$ (current USD value), units (shares held),
 open$ (cost basis per share), and total_portfolio_value_usd. When you recommend trimming or selling, always express
 the action as a specific dollar amount AND share count drawn from that data — never just a percentage like "trim to 2%".
 Example: "Sell 3 units of TEAM (~$240) — reduces exposure from $720 to $480." The human does not know what 2% of the
-portfolio is in dollars; give them the exact number so they can act immediately.
+portfolio is in dollars; give them the exact number so they can act immediately. If you mean "close", list exactly
+which lots/positions using the open$ values shown in the snapshot. If the exact lot list is not supported by the
+snapshot, do not create an action stance; queue follow-up research or ask for clarification.
 
 Deliver structured output only. Stances must use tickers you see above. forward_tasks should be concrete
 (research X, schedule replan, verify Y thesis, respond to risk flag, etc.). memory_note is what you want your next self to read first.
@@ -1293,7 +1396,7 @@ the trigger, say that plainly and use append_jobs to send a new research layer t
 
     # Proactive alert for action stances on automated cycles (ntfy questions already surface stances in the reply)
     if trigger_s not in ("ntfy_question",):
-        _notify_action_stances(cfg, result)
+        _notify_action_stances(cfg, result, portfolio_rows)
 
     # Push note — PM-initiated observation, any trigger
     note = (result.push_note or "").strip()

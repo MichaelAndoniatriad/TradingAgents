@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.portfolio_advisor.advisor_pm import (
     _append_pm_memory_md,
+    _format_close_instruction,
+    _notify_action_stances,
     _pm_model,
     apply_pm_cycle_followups,
     load_recent_pm_cycles,
@@ -54,6 +56,52 @@ def test_run_pm_cycle_writes_logs(tmp_path):
 
 def test_pm_default_model_is_gpt_55():
     assert _pm_model({}) == "openai/gpt-5.5"
+
+
+def test_format_close_instruction_lists_exact_sell_lots():
+    rows = [
+        {
+            "symbolFull": "TEAM",
+            "positionId": 101,
+            "openRate": 167.49,
+            "units": 1.5,
+            "unitsBaseValueDollars": 130.0,
+            "unrealizedPnL": -42.5,
+        },
+        {
+            "symbolFull": "TEAM",
+            "positionId": 102,
+            "openRate": 154.93,
+            "units": 2.0,
+            "unitsBaseValueDollars": 177.0,
+            "unrealizedPnL": -21.0,
+        },
+    ]
+
+    out = _format_close_instruction("TEAM", "sell", "Exit the TEAM position.", rows)
+
+    assert "Close 2 TEAM position(s)" in out
+    assert "3.5 units" in out
+    assert "id 101" in out
+    assert "opened at $167" in out
+    assert "id 102" in out
+
+
+def test_notify_action_stances_suppresses_unchanged_repeats(tmp_path):
+    cfg = {"portfolio_advisor_dir": str(tmp_path / "pa"), "message_log_path": str(tmp_path / "messages.jsonl")}
+    res = AdvisorPMCycleResult(
+        executive_summary="x",
+        stances=[AdvisorPMTickerStance(ticker="TEAM", stance="sell", rationale="Exit TEAM.")],
+    )
+    rows = [{"symbolFull": "TEAM", "positionId": 1, "openRate": 100, "units": 2, "unitsBaseValueDollars": 180}]
+
+    with patch("tradingagents.portfolio_advisor.messaging.send_advisor_message") as send:
+        _notify_action_stances(cfg, res, rows)
+        _notify_action_stances(cfg, res, rows)
+
+    assert send.call_count == 1
+    body = send.call_args[0][2]
+    assert "Close 1 TEAM position(s)" in body
 
 
 def test_run_pm_cycle_prompt_includes_latest_research(tmp_path):

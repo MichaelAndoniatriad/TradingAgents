@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -36,14 +37,29 @@ def _save(cfg: Dict[str, Any], data: Dict[str, Any]) -> None:
     tmp.replace(p)
 
 
+def _similar_enough(a: str, b: str) -> bool:
+    """Treat tiny wording/price-refresh changes as the same open action."""
+    aa = " ".join(str(a or "").lower().split())
+    bb = " ".join(str(b or "").lower().split())
+    if aa == bb:
+        return True
+    if not aa or not bb:
+        return False
+    return SequenceMatcher(None, aa, bb).ratio() >= 0.90
+
+
 def upsert_action(
     cfg: Dict[str, Any],
     ticker: str,
     action: str,
     rationale: str,
     source: str,
-) -> None:
-    """Add or update an open action item. Deduplicates by ticker+action."""
+) -> str:
+    """Add or update an open action item. Deduplicates by ticker+action.
+
+    Returns ``created``, ``updated``, or ``unchanged`` so callers can avoid
+    repeatedly notifying the human about the same open action.
+    """
     data = _load(cfg)
     now = datetime.now(timezone.utc).isoformat()
     for item in data["items"]:
@@ -52,11 +68,13 @@ def upsert_action(
             and item.get("action") == action
             and item.get("status") == "open"
         ):
+            if _similar_enough(str(item.get("rationale") or ""), rationale):
+                return "unchanged"
             item["rationale"] = rationale[:300]
             item["updated_at"] = now
             item["source"] = source
             _save(cfg, data)
-            return
+            return "updated"
     data["items"].append(
         {
             "id": uuid.uuid4().hex[:12],
@@ -70,6 +88,7 @@ def upsert_action(
         }
     )
     _save(cfg, data)
+    return "created"
 
 
 def mark_done(cfg: Dict[str, Any], ticker: str, action: Optional[str] = None) -> int:

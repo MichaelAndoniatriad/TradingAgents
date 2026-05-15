@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -86,6 +88,54 @@ def _derive_level(subject: str) -> str:
     return "info"
 
 
+def _message_dedupe_minutes(cfg: Dict[str, Any]) -> int:
+    try:
+        return max(0, int(cfg.get("portfolio_advisor_message_dedupe_minutes", 180) or 0))
+    except (TypeError, ValueError):
+        return 180
+
+
+def _normalize_message_for_dedupe(text: str) -> str:
+    s = str(text or "").lower()
+    s = re.sub(r"https?://\S+", " ", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def _is_correction(subject: str, body: str) -> bool:
+    txt = f"{subject}\n{body}".lower()
+    return any(word in txt for word in ("correction:", "correcting", "ignore earlier", "superseded"))
+
+
+def _recent_duplicate_message(cfg: Dict[str, Any], subject: str, body: str) -> Optional[Dict[str, Any]]:
+    """Return a recent near-duplicate message record, if one should suppress delivery."""
+    minutes = _message_dedupe_minutes(cfg)
+    if minutes <= 0 or _is_correction(subject, body):
+        return None
+    now = datetime.now(timezone.utc)
+    subj = str(subject or "").strip().lower()
+    norm = _normalize_message_for_dedupe(body)
+    if not norm:
+        return None
+    for row in load_recent_messages(cfg, limit=80):
+        if str(row.get("subject") or "").strip().lower() != subj:
+            continue
+        if row.get("suppressed_duplicate"):
+            continue
+        try:
+            ts = datetime.fromisoformat(str(row.get("timestamp") or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if (now - ts).total_seconds() > minutes * 60:
+            continue
+        old = _normalize_message_for_dedupe(str(row.get("body") or ""))
+        if old == norm or SequenceMatcher(None, old, norm).ratio() >= 0.88:
+            return row
+    return None
+
+
 def append_message_record(
     cfg: Dict[str, Any],
     *,
@@ -95,6 +145,7 @@ def append_message_record(
     smtp_ok: bool,
     webhook_attempted: bool,
     smtp_attempted: bool,
+    suppressed_duplicate: bool = False,
 ) -> None:
     """Append one JSON object as a single line. Never raises."""
     path = message_log_path(cfg)
@@ -114,6 +165,7 @@ def append_message_record(
         "webhook_ok": bool(webhook_ok),
         "smtp_ok": bool(smtp_ok),
         "delivered": bool(webhook_ok or smtp_ok),
+        "suppressed_duplicate": bool(suppressed_duplicate),
     }
     line = json.dumps(row, ensure_ascii=False) + "\n"
     try:
@@ -164,6 +216,21 @@ def send_advisor_message(cfg: Dict[str, Any], subject: str, body: str) -> bool:
     success) so the UI Messages page can render notifications offline.
     Returns True if at least one channel succeeded or was attempted with 2xx.
     """
+    duplicate = _recent_duplicate_message(cfg, subject, body)
+    if duplicate is not None:
+        append_message_record(
+            cfg,
+            subject=subject,
+            body=body,
+            webhook_ok=False,
+            smtp_ok=False,
+            webhook_attempted=False,
+            smtp_attempted=False,
+            suppressed_duplicate=True,
+        )
+        logger.info("suppressed duplicate advisor message: %s", subject[:120])
+        return False
+
     webhook_ok = False
     url = (cfg.get("analysis_webhook_url") or "").strip()
     webhook_attempted = bool(url)

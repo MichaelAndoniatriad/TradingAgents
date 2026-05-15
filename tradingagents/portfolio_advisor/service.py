@@ -379,6 +379,8 @@ def _post_batch_pm_brief(cfg: Dict[str, Any], results: List[Dict[str, Any]]) -> 
         verdicts = "\n".join(f"{r['ticker']}: {r['verdict']}" for r in results if r.get("verdict"))
         context = f"Research batch just completed. Individual results:\n{verdicts}\n\nBrief each ticker: one line, verdict first."
         result = run_pm_cycle(cfg, trigger="batch_complete", extra_context=context, hold_for_approval=False)
+        if result.push_note or any(s.stance in ("sell", "trim") for s in (result.stances or [])):
+            return
         if result.stances:
             lines = []
             for s in result.stances:

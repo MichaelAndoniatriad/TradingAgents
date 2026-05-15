@@ -114,6 +114,8 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "event_log_path": None,
     # Append-only JSONL of outbound advisor messages (webhook/SMTP). UI reads this.
     "message_log_path": None,
+    # Suppress near-identical advisor pushes inside this rolling window. Corrections are never suppressed.
+    "portfolio_advisor_message_dedupe_minutes": 180,
     # Injected into PM ``past_context`` with markdown memory: rolling calendar window.
     "memory_context_lookback_days": 90,
     "memory_context_max_same_ticker": 8,
