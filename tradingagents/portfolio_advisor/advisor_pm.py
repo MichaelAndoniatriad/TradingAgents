@@ -802,7 +802,10 @@ def run_pm_cycle(
     claude_block = f"{pm_claude}\n\n" if pm_claude else ""
     memory_block = f"Your working memory (PM_MEMORY.md — recent notes to self):\n{pm_memory}\n\n" if pm_memory else ""
 
+    today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     prompt = f"""{claude_block}You are the portfolio manager for a research stack. Advisory only: no trade orders, no claims that trades executed.
+
+Today's date (UTC): {today_utc}
 
 Authority: the human controls the real portfolio and every execution decision. LangGraph and lighter single-model passes are research tools — treat their outputs as inputs, not as orders or fills.
 

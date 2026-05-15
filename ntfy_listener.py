@@ -367,7 +367,7 @@ def _cmd_ask(question: str, topic: str) -> str:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        return ""
+        return "Thinking... answer coming shortly."
     except Exception as exc:  # noqa: BLE001
         return f"Failed to launch PM subprocess: {exc}"
 
@@ -648,10 +648,11 @@ def main() -> None:
                 if msg_event != "message":
                     continue
 
-                # Skip our own outgoing messages (tracked by ID or by known system titles)
+                # Skip our own outgoing messages (tracked by ID) and all system
+                # notifications (advisor always sets a Title; user phone messages never do).
                 if msg_id in _SENT_IDS:
                     continue
-                if (msg.get("title") or "").strip() in ("PM", "TradingAgents"):
+                if (msg.get("title") or "").strip():
                     continue
 
                 text = (msg.get("message") or "").strip()
