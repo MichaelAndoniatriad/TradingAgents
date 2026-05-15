@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import requests
+
 from tradingagents.advisor.email_notify import analysis_smtp_ready, send_plain_email
 from tradingagents.advisor.notify import send_webhook
 
@@ -64,6 +66,7 @@ def ntfy_verdict(text: str, ticker: str) -> str:
     return text[:120]
 
 _MAX_BODY_PERSISTED = 50000
+_TELEGRAM_MAX_TEXT = 4096
 
 
 def message_log_path(cfg: Dict[str, Any]) -> Path:
@@ -86,6 +89,56 @@ def _derive_level(subject: str) -> str:
     if "REVIEW" in s or "ATTENTION" in s:
         return "review"
     return "info"
+
+
+def telegram_ready(cfg: Dict[str, Any]) -> bool:
+    """Return True when Telegram bot delivery has the required config."""
+    return bool(
+        str(cfg.get("analysis_telegram_bot_token") or "").strip()
+        and str(cfg.get("analysis_telegram_chat_id") or "").strip()
+    )
+
+
+def _telegram_text(subject: str, body: str) -> str:
+    title = str(subject or "TradingAgents").strip() or "TradingAgents"
+    text = f"{title}\n\n{body or ''}".strip()
+    if len(text) <= _TELEGRAM_MAX_TEXT:
+        return text
+    suffix = "\n\n[truncated - see dashboard for full text]"
+    return text[: _TELEGRAM_MAX_TEXT - len(suffix)] + suffix
+
+
+def send_telegram_message(cfg: Dict[str, Any], subject: str, body: str) -> bool:
+    """Send one advisor message via Telegram Bot API."""
+    token = str(cfg.get("analysis_telegram_bot_token") or "").strip()
+    chat_id = str(cfg.get("analysis_telegram_chat_id") or "").strip()
+    if not token or not chat_id:
+        return False
+    payload: Dict[str, Any] = {
+        "chat_id": chat_id,
+        "text": _telegram_text(subject, body),
+        "disable_web_page_preview": True,
+    }
+    thread_id = str(cfg.get("analysis_telegram_thread_id") or "").strip()
+    if thread_id:
+        try:
+            payload["message_thread_id"] = int(thread_id)
+        except ValueError:
+            payload["message_thread_id"] = thread_id
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json=payload,
+            timeout=30,
+        )
+        if 200 <= r.status_code < 300:
+            data = r.json()
+            return bool(data.get("ok", True))
+        logger.warning("Telegram returned %s: %s", r.status_code, r.text[:500])
+        return False
+    except (requests.RequestException, ValueError) as e:
+        logger.warning("Telegram send failed: %s", e)
+        return False
 
 
 def _message_dedupe_minutes(cfg: Dict[str, Any]) -> int:
@@ -142,8 +195,10 @@ def append_message_record(
     subject: str,
     body: str,
     webhook_ok: bool,
+    telegram_ok: bool,
     smtp_ok: bool,
     webhook_attempted: bool,
+    telegram_attempted: bool,
     smtp_attempted: bool,
     suppressed_duplicate: bool = False,
 ) -> None:
@@ -160,11 +215,18 @@ def append_message_record(
         "body": str(body or "")[:_MAX_BODY_PERSISTED],
         "level": _derive_level(str(subject or "")),
         "channels_attempted": [
-            c for c, ok in (("webhook", webhook_attempted), ("smtp", smtp_attempted)) if ok
+            c
+            for c, ok in (
+                ("webhook", webhook_attempted),
+                ("telegram", telegram_attempted),
+                ("smtp", smtp_attempted),
+            )
+            if ok
         ],
         "webhook_ok": bool(webhook_ok),
+        "telegram_ok": bool(telegram_ok),
         "smtp_ok": bool(smtp_ok),
-        "delivered": bool(webhook_ok or smtp_ok),
+        "delivered": bool(webhook_ok or telegram_ok or smtp_ok),
         "suppressed_duplicate": bool(suppressed_duplicate),
     }
     line = json.dumps(row, ensure_ascii=False) + "\n"
@@ -223,8 +285,10 @@ def send_advisor_message(cfg: Dict[str, Any], subject: str, body: str) -> bool:
             subject=subject,
             body=body,
             webhook_ok=False,
+            telegram_ok=False,
             smtp_ok=False,
             webhook_attempted=False,
+            telegram_attempted=False,
             smtp_attempted=False,
             suppressed_duplicate=True,
         )
@@ -239,6 +303,10 @@ def send_advisor_message(cfg: Dict[str, Any], subject: str, body: str) -> bool:
             webhook_ok = bool(send_webhook(url, body[:4000], extra={"title": subject}))
         except Exception as e:
             logger.warning("advisor webhook failed: %s", e)
+    telegram_ok = False
+    telegram_attempted = telegram_ready(cfg)
+    if telegram_attempted:
+        telegram_ok = send_telegram_message(cfg, subject, body)
     smtp_ok = False
     smtp_attempted = analysis_smtp_ready(cfg)
     if smtp_attempted:
@@ -261,11 +329,11 @@ def send_advisor_message(cfg: Dict[str, Any], subject: str, body: str) -> bool:
             )
         except Exception as e:
             logger.warning("advisor SMTP failed: %s", e)
-    sent = webhook_ok or smtp_ok
-    if not sent and (not url) and (not smtp_attempted):
+    sent = webhook_ok or telegram_ok or smtp_ok
+    if not sent and (not url) and (not telegram_attempted) and (not smtp_attempted):
         logger.warning(
             "Portfolio advisor message not sent (configure TRADINGAGENTS_ANALYSIS_WEBHOOK_URL "
-            "and/or analysis email + SMTP): %s",
+            "and/or Telegram bot/chat and/or analysis email + SMTP): %s",
             subject[:120],
         )
     try:
@@ -274,8 +342,10 @@ def send_advisor_message(cfg: Dict[str, Any], subject: str, body: str) -> bool:
             subject=subject,
             body=body,
             webhook_ok=webhook_ok,
+            telegram_ok=telegram_ok,
             smtp_ok=smtp_ok,
             webhook_attempted=webhook_attempted,
+            telegram_attempted=telegram_attempted,
             smtp_attempted=smtp_attempted,
         )
     except Exception:

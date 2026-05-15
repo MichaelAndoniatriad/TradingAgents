@@ -25,6 +25,9 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_LEARNED_RULES_ENABLED": "learned_rules_enabled",
     "TRADINGAGENTS_LEARNED_RULES_PATH":   "learned_rules_path",
     "TRADINGAGENTS_ANALYSIS_WEBHOOK_URL": "analysis_webhook_url",
+    "TRADINGAGENTS_ANALYSIS_TELEGRAM_BOT_TOKEN": "analysis_telegram_bot_token",
+    "TRADINGAGENTS_ANALYSIS_TELEGRAM_CHAT_ID": "analysis_telegram_chat_id",
+    "TRADINGAGENTS_ANALYSIS_TELEGRAM_THREAD_ID": "analysis_telegram_thread_id",
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_DIR": "portfolio_advisor_dir",
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_STATE_PATH": "portfolio_advisor_state_path",
     "TRADINGAGENTS_PORTFOLIO_ADVISOR_WEEKDAY": "portfolio_advisor_weekly_weekday",
@@ -181,6 +184,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Optional Slack-style webhook (JSON `{"text":...}`) after each successful
     # full-graph run — posts the advisory PM memo (truncated), not an order.
     "analysis_webhook_url": None,
+    # Optional Telegram delivery for advisor messages. Create a bot with BotFather,
+    # message it/group it, then set token + chat id in env/.env.
+    "analysis_telegram_bot_token": None,
+    "analysis_telegram_chat_id": None,
+    "analysis_telegram_thread_id": None,
     # Autonomous portfolio advisor (eToro positions → LLM schedule → due deep runs).
     # portfolio_advisor_weekly_weekday: 0=Mon … 5=Sat, 6=Sun (default Saturday).
     "portfolio_advisor_dir": None,

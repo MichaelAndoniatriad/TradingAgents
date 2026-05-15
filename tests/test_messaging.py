@@ -32,3 +32,36 @@ def test_send_advisor_message_never_suppresses_correction(tmp_path):
     rows = messaging.load_recent_messages(cfg, limit=5)
     assert rows[0]["suppressed_duplicate"] is False
     assert rows[0]["body"].startswith("Correction:")
+
+
+def test_send_advisor_message_sends_telegram(tmp_path, monkeypatch):
+    cfg = {
+        "message_log_path": str(tmp_path / "messages.jsonl"),
+        "analysis_telegram_bot_token": "123:test-token",
+        "analysis_telegram_chat_id": "456",
+    }
+    calls = []
+
+    class Resp:
+        status_code = 200
+        text = '{"ok": true}'
+
+        @staticmethod
+        def json():
+            return {"ok": True}
+
+    def fake_post(url, json, timeout):
+        calls.append((url, json, timeout))
+        return Resp()
+
+    monkeypatch.setattr(messaging.requests, "post", fake_post)
+
+    sent = messaging.send_advisor_message(cfg, "Action required", "Close TEAM lot 123.")
+
+    assert sent is True
+    assert calls[0][0] == "https://api.telegram.org/bot123:test-token/sendMessage"
+    assert calls[0][1]["chat_id"] == "456"
+    assert "Action required" in calls[0][1]["text"]
+    rows = messaging.load_recent_messages(cfg, limit=1)
+    assert rows[0]["telegram_ok"] is True
+    assert rows[0]["channels_attempted"] == ["telegram"]

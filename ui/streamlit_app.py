@@ -166,13 +166,17 @@ def _format_key_data_compact(kd: Dict[str, Any], *, max_len: int = 280) -> str:
 
 def _channel_status_plain(row: Dict[str, Any]) -> str:
     bits: List[str] = []
-    for key, label in (("webhook_ok", "Webhook"), ("smtp_ok", "Email")):
-        if label not in (row.get("channels_attempted") or []):
+    for key, channel, label in (
+        ("webhook_ok", "webhook", "Webhook"),
+        ("telegram_ok", "telegram", "Telegram"),
+        ("smtp_ok", "smtp", "Email"),
+    ):
+        if channel not in (row.get("channels_attempted") or []):
             continue
         ok = bool(row.get(key))
         bits.append(f"{label}: {'sent' if ok else 'failed'}")
     if not bits:
-        return "Saved in this app only (no webhook or email configured for outbound delivery)"
+        return "Saved in this app only (no webhook, Telegram, or email configured for outbound delivery)"
     return " · ".join(bits)
 
 
@@ -587,8 +591,12 @@ def _level_badge_html(level: str) -> str:
 
 def _channel_status_html(row: Dict[str, Any]) -> str:
     pieces: List[str] = []
-    for key, label in (("webhook_ok", "webhook"), ("smtp_ok", "email")):
-        attempted = label in (row.get("channels_attempted") or [])
+    for key, channel, label in (
+        ("webhook_ok", "webhook", "webhook"),
+        ("telegram_ok", "telegram", "telegram"),
+        ("smtp_ok", "smtp", "email"),
+    ):
+        attempted = channel in (row.get("channels_attempted") or [])
         if not attempted:
             continue
         ok = bool(row.get(key))
