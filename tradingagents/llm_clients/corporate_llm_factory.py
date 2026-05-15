@@ -31,6 +31,8 @@ _ROLE_TO_SPEC_KEY: Dict[str, str] = {
     "risk_neutral": "risk_neutral",
     "risk_conservative": "risk_conservative",
     "research_manager": "research_manager",
+    # Combined Research Manager + Trader node — reuses research_manager routing spec.
+    "research_execution": "research_manager",
     "portfolio_manager": "portfolio_manager",
     "reflection": "reflection",
 }

@@ -247,6 +247,92 @@ class PortfolioDecision(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# Research And Execution (merged Research Manager + Trader)
+# ---------------------------------------------------------------------------
+
+
+class ResearchExecutionPlan(BaseModel):
+    """Combined output: investment plan (from Research Manager) + trade proposal (from Trader).
+
+    Replaces the two-node Research Manager → Trader sequence with a single
+    LLM call that produces both artifacts.  Each render helper slices the
+    relevant fields so the downstream state fields keep their existing shape.
+    """
+
+    recommendation: PortfolioRating = Field(
+        description=(
+            "Investment recommendation: Buy / Overweight / Hold / Underweight / Sell. "
+            "Reserve Hold for situations where the evidence on both sides is genuinely balanced."
+        ),
+    )
+    rationale: str = Field(
+        description=(
+            "Conversational summary of the key arguments (from the debate or analyst "
+            "reports), ending with which view carried the recommendation. Speak naturally."
+        ),
+    )
+    strategic_actions: str = Field(
+        description=(
+            "Concrete steps: staged position sizing (start with half, add remainder "
+            "over 2–4 weeks if thesis confirms), ~5% cap per name, average up not down, "
+            "and 2–3 measurable thesis-break metrics to monitor."
+        ),
+    )
+    trade_action: TraderAction = Field(
+        description="Immediate transaction direction consistent with the recommendation: Buy, Hold, or Sell.",
+    )
+    trade_reasoning: str = Field(
+        description=(
+            "2–4 sentences justifying the trade action, anchored in the analyst reports "
+            "and the investment plan above."
+        ),
+    )
+    entry_price: Optional[float] = Field(
+        default=None,
+        description="Optional entry price target in the instrument's quote currency.",
+    )
+    stop_loss: Optional[float] = Field(
+        default=None,
+        description="Optional stop-loss price in the instrument's quote currency.",
+    )
+    position_sizing: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional sizing guidance consistent with the staged-entry policy, "
+            "e.g. '2.5% now, add to 5% over 3 weeks if thesis confirms'."
+        ),
+    )
+
+
+def render_research_execution_plan_part(plan: ResearchExecutionPlan) -> str:
+    """Render the investment-plan portion (stored in AgentState.investment_plan)."""
+    return "\n".join([
+        f"**Recommendation**: {plan.recommendation.value}",
+        "",
+        f"**Rationale**: {plan.rationale}",
+        "",
+        f"**Strategic Actions**: {plan.strategic_actions}",
+    ])
+
+
+def render_research_execution_trade_part(plan: ResearchExecutionPlan) -> str:
+    """Render the trade-proposal portion (stored in AgentState.trader_investment_plan)."""
+    parts = [
+        f"**Action**: {plan.trade_action.value}",
+        "",
+        f"**Reasoning**: {plan.trade_reasoning}",
+    ]
+    if plan.entry_price is not None:
+        parts.extend(["", f"**Entry Price**: {plan.entry_price}"])
+    if plan.stop_loss is not None:
+        parts.extend(["", f"**Stop Loss**: {plan.stop_loss}"])
+    if plan.position_sizing:
+        parts.extend(["", f"**Position Sizing**: {plan.position_sizing}"])
+    parts.extend(["", f"FINAL TRANSACTION PROPOSAL: **{plan.trade_action.value.upper()}**"])
+    return "\n".join(parts)
+
+
 def render_pm_decision(decision: PortfolioDecision) -> str:
     """Render a PortfolioDecision back to the markdown shape the rest of the system expects.
 

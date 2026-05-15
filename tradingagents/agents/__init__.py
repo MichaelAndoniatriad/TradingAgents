@@ -18,6 +18,7 @@ from .risk_mgmt.neutral_debator import create_neutral_debator
 
 from .managers.research_manager import create_research_manager
 from .managers.portfolio_manager import create_portfolio_manager
+from .managers.research_and_execution import create_research_and_execution_agent
 
 from .trader.trader import create_trader
 
@@ -29,6 +30,7 @@ __all__ = [
     "create_bear_researcher",
     "create_bull_researcher",
     "create_research_manager",
+    "create_research_and_execution_agent",
     "create_fundamentals_analyst",
     "create_market_analyst",
     "create_neutral_debator",

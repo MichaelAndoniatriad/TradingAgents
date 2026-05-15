@@ -39,21 +39,28 @@ class GraphSetup:
         """Resolve the LLM for a graph role (corporate) or legacy quick/deep pools."""
         if self._corporate:
             return self.llm_by_role[role]
-        if role in ("research_manager", "portfolio_manager"):
+        if role in ("research_execution", "portfolio_manager"):
             return self.deep_thinking_llm
         return self.quick_thinking_llm
 
     def setup_graph(
-        self, selected_analysts=["market", "social", "news", "fundamentals"]
+        self,
+        selected_analysts=["market", "social", "news", "fundamentals"],
+        *,
+        debate_enabled: bool = True,
     ):
         """Set up and compile the agent workflow graph.
 
         Args:
-            selected_analysts (list): List of analyst types to include. Options are:
+            selected_analysts: List of analyst types to include. Options are:
                 - "market": Market analyst
                 - "social": Social media analyst
                 - "news": News analyst
                 - "fundamentals": Fundamentals analyst
+            debate_enabled: When True (default), the bull/bear researcher debate
+                is included before Research And Execution. When False, analysts
+                feed directly into Research And Execution — saves 2+ LLM calls
+                but removes the adversarial signal.
         """
         if len(selected_analysts) == 0:
             raise ValueError("Trading Agents Graph Setup Error: no analysts selected!")
@@ -95,15 +102,13 @@ class GraphSetup:
             delete_nodes["fundamentals"] = create_msg_delete()
             tool_nodes["fundamentals"] = self.tool_nodes["fundamentals"]
 
-        # Create researcher and manager nodes
-        bull_researcher_node = create_bull_researcher(self._llm("bull"))
-        bear_researcher_node = create_bear_researcher(self._llm("bear"))
-        research_manager_node = create_research_manager(self._llm("research_manager"))
-        trader_node = create_trader(self._llm("trader"))
+        # Research And Execution: combined Research Manager + Trader (single LLM call).
+        research_and_execution_node = create_research_and_execution_agent(
+            self._llm("research_execution")
+        )
 
-        # Create risk analysis nodes
+        # Risk analysis nodes (neutral debator removed — aggressive ↔ conservative only).
         aggressive_analyst = create_aggressive_debator(self._llm("risk_aggressive"))
-        neutral_analyst = create_neutral_debator(self._llm("risk_neutral"))
         conservative_analyst = create_conservative_debator(self._llm("risk_conservative"))
         portfolio_manager_node = create_portfolio_manager(self._llm("portfolio_manager"))
 
@@ -118,28 +123,22 @@ class GraphSetup:
             )
             workflow.add_node(f"tools_{analyst_type}", tool_nodes[analyst_type])
 
-        # Add other nodes
-        workflow.add_node("Bull Researcher", bull_researcher_node)
-        workflow.add_node("Bear Researcher", bear_researcher_node)
-        workflow.add_node("Research Manager", research_manager_node)
-        workflow.add_node("Trader", trader_node)
+        # Add decision nodes
+        workflow.add_node("Research And Execution", research_and_execution_node)
         workflow.add_node("Aggressive Analyst", aggressive_analyst)
-        workflow.add_node("Neutral Analyst", neutral_analyst)
         workflow.add_node("Conservative Analyst", conservative_analyst)
         workflow.add_node("Portfolio Manager", portfolio_manager_node)
 
         # Define edges
-        # Start with the first analyst
         first_analyst = selected_analysts[0]
         workflow.add_edge(START, f"{first_analyst.capitalize()} Analyst")
 
-        # Connect analysts in sequence
+        # Connect analysts in sequence; last analyst leads to debate or straight to R&E.
         for i, analyst_type in enumerate(selected_analysts):
             current_analyst = f"{analyst_type.capitalize()} Analyst"
             current_tools = f"tools_{analyst_type}"
             current_clear = f"Msg Clear {analyst_type.capitalize()}"
 
-            # Add conditional edges for current analyst
             workflow.add_conditional_edges(
                 current_analyst,
                 getattr(self.conditional_logic, f"should_continue_{analyst_type}"),
@@ -147,32 +146,43 @@ class GraphSetup:
             )
             workflow.add_edge(current_tools, current_analyst)
 
-            # Connect to next analyst or to Bull Researcher if this is the last analyst
             if i < len(selected_analysts) - 1:
                 next_analyst = f"{selected_analysts[i+1].capitalize()} Analyst"
                 workflow.add_edge(current_clear, next_analyst)
             else:
-                workflow.add_edge(current_clear, "Bull Researcher")
+                # Last analyst: go to debate or directly to Research And Execution.
+                if debate_enabled:
+                    workflow.add_edge(current_clear, "Bull Researcher")
+                else:
+                    workflow.add_edge(current_clear, "Research And Execution")
 
-        # Add remaining edges
-        workflow.add_conditional_edges(
-            "Bull Researcher",
-            self.conditional_logic.should_continue_debate,
-            {
-                "Bear Researcher": "Bear Researcher",
-                "Research Manager": "Research Manager",
-            },
-        )
-        workflow.add_conditional_edges(
-            "Bear Researcher",
-            self.conditional_logic.should_continue_debate,
-            {
-                "Bull Researcher": "Bull Researcher",
-                "Research Manager": "Research Manager",
-            },
-        )
-        workflow.add_edge("Research Manager", "Trader")
-        workflow.add_edge("Trader", "Aggressive Analyst")
+        # Bull/Bear debate (only wired when debate_enabled=True).
+        if debate_enabled:
+            bull_researcher_node = create_bull_researcher(self._llm("bull"))
+            bear_researcher_node = create_bear_researcher(self._llm("bear"))
+            workflow.add_node("Bull Researcher", bull_researcher_node)
+            workflow.add_node("Bear Researcher", bear_researcher_node)
+
+            workflow.add_conditional_edges(
+                "Bull Researcher",
+                self.conditional_logic.should_continue_debate,
+                {
+                    "Bear Researcher": "Bear Researcher",
+                    "Research And Execution": "Research And Execution",
+                },
+            )
+            workflow.add_conditional_edges(
+                "Bear Researcher",
+                self.conditional_logic.should_continue_debate,
+                {
+                    "Bull Researcher": "Bull Researcher",
+                    "Research And Execution": "Research And Execution",
+                },
+            )
+
+        # Research And Execution → risk debate → Portfolio Manager
+        workflow.add_edge("Research And Execution", "Aggressive Analyst")
+
         workflow.add_conditional_edges(
             "Aggressive Analyst",
             self.conditional_logic.should_continue_risk_analysis,
@@ -183,14 +193,6 @@ class GraphSetup:
         )
         workflow.add_conditional_edges(
             "Conservative Analyst",
-            self.conditional_logic.should_continue_risk_analysis,
-            {
-                "Neutral Analyst": "Neutral Analyst",
-                "Portfolio Manager": "Portfolio Manager",
-            },
-        )
-        workflow.add_conditional_edges(
-            "Neutral Analyst",
             self.conditional_logic.should_continue_risk_analysis,
             {
                 "Aggressive Analyst": "Aggressive Analyst",

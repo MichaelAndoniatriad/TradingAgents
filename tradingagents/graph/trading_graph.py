@@ -117,7 +117,7 @@ class TradingAgentsGraph:
 
             _ANALYST_ROLES = ("market", "social", "news", "fundamentals")
             _DEBATE_ROLES = (
-                "bull", "bear", "trader", "research_manager",
+                "bull", "bear", "trader", "research_manager", "research_execution",
                 "risk_aggressive", "risk_neutral", "risk_conservative",
             )
             self.llm_by_role = {}
@@ -180,7 +180,10 @@ class TradingAgentsGraph:
         self.log_states_dict = {}  # date to full state dict
 
         # Set up the graph: keep the workflow for recompilation with a checkpointer.
-        self.workflow = self.graph_setup.setup_graph(selected_analysts)
+        self.workflow = self.graph_setup.setup_graph(
+            selected_analysts,
+            debate_enabled=self.config.get("debate_enabled", True),
+        )
         self.graph = self.workflow.compile()
         self._checkpointer_ctx = None
 
