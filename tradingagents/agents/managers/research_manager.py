@@ -21,9 +21,13 @@ def create_research_manager(llm):
 
     def research_manager_node(state) -> dict:
         instrument_context = build_instrument_context(state["company_of_interest"])
-        history = state["investment_debate_state"].get("history", "")
-
         investment_debate_state = state["investment_debate_state"]
+        bull_position = investment_debate_state.get("bull_position", "")
+        bear_position = investment_debate_state.get("bear_position", "")
+        market_report = state.get("market_report", "")
+        sentiment_report = state.get("sentiment_report", "")
+        news_report = state.get("news_report", "")
+        fundamentals_report = state.get("fundamentals_report", "")
 
         # Static: role + rating scale + policy — cached across all ticker runs for the same session.
         static_system = (
@@ -39,11 +43,19 @@ def create_research_manager(llm):
             + get_investor_policy_full_instruction()
             + get_language_instruction()
         )
-        # Dynamic: instrument + debate history change per call.
+        # Dynamic: instrument + analyst reports + final debate positions (no full history).
         dynamic_user = (
             f"{instrument_context}\n\n"
             f"---\n\n"
-            f"**Debate History:**\n{history}"
+            f"**Analyst Reports:**\n"
+            f"Market research: {market_report}\n\n"
+            f"Social media sentiment: {sentiment_report}\n\n"
+            f"Latest world news: {news_report}\n\n"
+            f"Company fundamentals: {fundamentals_report}\n\n"
+            f"---\n\n"
+            f"**Final Debate Positions:**\n"
+            f"Bull: {bull_position}\n\n"
+            f"Bear: {bear_position}"
         )
 
         messages = [

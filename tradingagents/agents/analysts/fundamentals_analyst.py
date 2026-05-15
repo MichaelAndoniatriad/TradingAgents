@@ -1,3 +1,5 @@
+import logging
+
 from langchain_core.messages import SystemMessage
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
@@ -11,6 +13,8 @@ from tradingagents.agents.utils.agent_utils import (
     get_language_instruction,
 )
 from tradingagents.dataflows.config import get_config
+
+logger = logging.getLogger(__name__)
 
 
 def create_fundamentals_analyst(llm):
@@ -58,6 +62,11 @@ def create_fundamentals_analyst(llm):
 
         if len(result.tool_calls) == 0:
             report = result.content
+            if len(report) < 100:
+                logger.warning(
+                    "fundamentals_analyst returned no tool calls for %s — report may be empty",
+                    state["company_of_interest"],
+                )
 
         return {
             "messages": [result],

@@ -185,6 +185,10 @@ class TestTraderAgent:
 def _make_rm_state():
     return {
         "company_of_interest": "NVDA",
+        "market_report": "Market looks stable.",
+        "sentiment_report": "Sentiment is positive.",
+        "news_report": "No major news.",
+        "fundamentals_report": "Strong fundamentals.",
         "investment_debate_state": {
             "history": "Bull and bear arguments here.",
             "bull_history": "Bull says...",
@@ -192,6 +196,8 @@ def _make_rm_state():
             "current_response": "",
             "judge_decision": "",
             "count": 1,
+            "bull_position": "Bullish on NVDA — AI tailwinds support growth.",
+            "bear_position": "Bearish on NVDA — valuation is stretched.",
         },
     }
 

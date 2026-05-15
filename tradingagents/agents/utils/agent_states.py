@@ -15,6 +15,8 @@ class InvestDebateState(TypedDict):
     current_response: Annotated[str, "Latest response"]  # Last response
     judge_decision: Annotated[str, "Final judge decision"]  # Last response
     count: Annotated[int, "Length of the current conversation"]  # Conversation length
+    bull_position: Annotated[str, "Bull's latest position summary (1-2 sentences)"]
+    bear_position: Annotated[str, "Bear's latest position summary (1-2 sentences)"]
 
 
 # Risk management team state
@@ -71,3 +73,4 @@ class AgentState(MessagesState):
     ]
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
     past_context: Annotated[str, "Memory log context injected at run start (same-ticker decisions + cross-ticker lessons)"]
+    debate_converged: Annotated[bool, "Whether the debate converged to consensus before the round limit"]

@@ -32,6 +32,8 @@ class Propagator:
                     "current_response": "",
                     "judge_decision": "",
                     "count": 0,
+                    "bull_position": "",
+                    "bear_position": "",
                 }
             ),
             "risk_debate_state": RiskDebateState(
