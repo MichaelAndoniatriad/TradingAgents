@@ -8,8 +8,12 @@ DATA GAPS / output-rules tail, but each defines its own middle sections.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import time
 from datetime import date
+from pathlib import Path
 from typing import Any, Dict
 
 from langchain_core.messages import HumanMessage
@@ -148,6 +152,53 @@ _JOB_TYPE_PROMPTS = {
 }
 
 
+_DEFAULT_CACHE_TTL_HOURS = 12
+
+
+def _cache_dir() -> Path:
+    return Path(os.path.expanduser("~")) / ".tradingagents" / "cache" / "single_model"
+
+
+def _cache_path(ticker: str, job_type: str, trade_date: str) -> Path:
+    return _cache_dir() / f"{ticker}_{job_type}_{trade_date}.json"
+
+
+def _cache_ttl_hours() -> float:
+    try:
+        return float(os.environ.get("SINGLE_MODEL_CACHE_TTL_HOURS") or _DEFAULT_CACHE_TTL_HOURS)
+    except (ValueError, TypeError):
+        return _DEFAULT_CACHE_TTL_HOURS
+
+
+def _read_cache(ticker: str, job_type: str, trade_date: str) -> str | None:
+    path = _cache_path(ticker, job_type, trade_date)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    written_at = data.get("written_at")
+    if not written_at:
+        return None
+    try:
+        age_hours = (time.time() - float(written_at)) / 3600
+    except (TypeError, ValueError):
+        return None
+    if age_hours >= _cache_ttl_hours():
+        return None
+    return data.get("result") or None
+
+
+def _write_cache(ticker: str, job_type: str, trade_date: str, result: str) -> None:
+    path = _cache_path(ticker, job_type, trade_date)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"result": result, "written_at": time.time()}, ensure_ascii=False)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    tmp.replace(path)
+
+
 def _build_prompt(
     cfg: Dict[str, Any],
     jt: str,
@@ -210,6 +261,12 @@ def run_single_model_analysis(
     ev_ctx = format_recent_events_for_ticker(cfg, sym, days=ev_days, max_events=20)
 
     today = date.today().isoformat()
+
+    cached = _read_cache(sym, jt, today)
+    if cached:
+        logger.info("single_model_analysis cache hit: %s %s %s", sym, jt, today)
+        return cached
+
     prompt = _build_prompt(cfg, jt, sym, today, px_line, md_ctx, ev_ctx)
     llm = _reasoning_llm(cfg)
     msg = llm.invoke([HumanMessage(content=prompt)])
@@ -221,6 +278,12 @@ def run_single_model_analysis(
                 parts.append(block.get("text", ""))
         content = "\n".join(parts) if parts else str(content)
     text = str(content).strip()
+
+    if text and not text.startswith("Error"):
+        try:
+            _write_cache(sym, jt, today, text)
+        except Exception:
+            logger.debug("single_model_analysis cache write failed", exc_info=True)
     if bool(cfg.get("portfolio_advisor_single_model_notify", False)):
         subj = f"{sym} {jt.replace('_', ' ')}"
         messaging.send_advisor_message(cfg, subj, messaging.ntfy_verdict(text, sym))
