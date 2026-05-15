@@ -193,6 +193,53 @@ def test_run_pm_cycle_prompt_includes_latest_research(tmp_path):
     assert "Retrieved evidence refs and known dates" in prompt
 
 
+def test_ntfy_question_prompt_excludes_prior_pm_prose(tmp_path):
+    event_log = tmp_path / "events.jsonl"
+    cfg = {
+        "portfolio_advisor_dir": str(tmp_path / "pa"),
+        "event_log_path": str(event_log),
+        "portfolio_advisor_pm_prior_cycles": 2,
+    }
+    event_log.write_text(
+        (
+            '{"timestamp":"2026-05-15T09:00:00+00:00","ticker":"TEAM",'
+            '"event_type":"single_model_analysis","key_data":{"job_type":"thesis_check",'
+            '"excerpt":"Latest TEAM evidence."},"outcome":null}\n'
+        ),
+        encoding="utf-8",
+    )
+    old = AdvisorPMCycleResult(
+        executive_summary="OLD URGENT PM PROSE THAT SHOULD NOT BE ECHOED",
+        memory_note="OLD MEMORY NOTE THAT SHOULD NOT BE ECHOED",
+    )
+    _append_pm_memory_md(cfg, trigger="old_cycle", result=old)
+    _write_pm_memory_update = __import__(
+        "tradingagents.portfolio_advisor.advisor_pm",
+        fromlist=["_write_pm_memory_update"],
+    )._write_pm_memory_update
+    _write_pm_memory_update(cfg, "OLD STRUCTURED MEMORY THAT SHOULD NOT BE ECHOED", "old_cycle")
+    fake = AdvisorPMCycleResult(executive_summary="answer")
+    m_struct = MagicMock()
+    m_struct.invoke.return_value = fake
+    m_llm = MagicMock()
+    m_client = MagicMock()
+    m_client.get_llm.return_value = m_llm
+
+    with patch("tradingagents.portfolio_advisor.advisor_pm.etoro_scan.fetch_portfolio_rows") as fetch:
+        fetch.return_value = ({}, "portfolio text here", ["TEAM"], [])
+        with patch("tradingagents.portfolio_advisor.advisor_pm.create_llm_client", return_value=m_client):
+            with patch("tradingagents.portfolio_advisor.advisor_pm.bind_structured", return_value=m_struct):
+                run_pm_cycle(cfg, trigger="ntfy_question", extra_context="what should I do?")
+
+    prompt = m_struct.invoke.call_args[0][0][0].content
+    assert "Latest TEAM evidence." in prompt
+    assert "what should I do?" in prompt
+    assert "OLD URGENT PM PROSE" not in prompt
+    assert "OLD MEMORY NOTE" not in prompt
+    assert "OLD STRUCTURED MEMORY" not in prompt
+    assert "Do not echo prior PM prose" in prompt
+
+
 def test_run_pm_cycle_downgrades_unsupported_action_stance(tmp_path):
     cfg = {"portfolio_advisor_dir": str(tmp_path / "pa"), "event_log_path": str(tmp_path / "events.jsonl")}
     fake = AdvisorPMCycleResult(
