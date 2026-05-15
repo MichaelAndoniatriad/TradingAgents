@@ -394,3 +394,29 @@ def portfolio_advisor_pm_cycle(
     except Exception as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1) from e
+
+
+@portfolio_app.command("telegram-listen")
+def portfolio_advisor_telegram_listen(
+    once: bool = typer.Option(False, "--once", help="Poll once and exit."),
+    interval: float = typer.Option(2.0, "--interval", help="Sleep seconds between long-poll requests."),
+    timeout: int = typer.Option(25, "--timeout", help="Telegram long-poll timeout seconds."),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Listen for Telegram bot messages and answer with the advisor PM."""
+    _configure_logging(verbose)
+    cfg = DEFAULT_CONFIG.copy()
+    try:
+        from tradingagents.portfolio_advisor.telegram_bot import poll_once, run_poll_loop
+
+        if once:
+            n = poll_once(cfg, timeout=timeout)
+            console.print(f"[cyan]Telegram listener:[/cyan] processed {n} message(s).")
+        else:
+            console.print("[cyan]Telegram listener running.[/cyan] Ctrl+C to stop.")
+            run_poll_loop(cfg, interval_seconds=interval, timeout=timeout)
+    except KeyboardInterrupt:
+        console.print("[yellow]Telegram listener stopped.[/yellow]")
+    except Exception as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e

@@ -1433,7 +1433,7 @@ the trigger, say that plainly and use append_jobs to send a new research layer t
 
     # Push note — only when it is not already included in the consolidated action alert.
     note = (result.push_note or "").strip()
-    if note and not action_alert_sent:
+    if note and not action_alert_sent and trigger_s != "ntfy_question":
         try:
             from tradingagents.portfolio_advisor import messaging
             messaging.send_advisor_message(cfg, "PM", note[:280])
