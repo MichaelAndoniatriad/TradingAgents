@@ -174,7 +174,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "portfolio_advisor_state_path": None,
     "portfolio_advisor_weekly_weekday": 5,
     "portfolio_advisor_max_jobs_per_plan": 15,
-    "portfolio_advisor_run_due_max": 2,
+    "portfolio_advisor_run_due_max": 8,
     "portfolio_advisor_deep_analysts": ["news", "fundamentals", "market"],
     # Weekly ``advisor portfolio weekly`` = lightweight check only (no full replan).
     "portfolio_advisor_weekly_llm": False,
