@@ -1,10 +1,11 @@
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import SystemMessage
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_indicators,
     get_investor_policy_analyst_supplement,
     get_language_instruction,
     get_stock_data,
+    get_stock_summary,
 )
 from tradingagents.dataflows.config import get_config
 
@@ -16,11 +17,22 @@ def create_market_analyst(llm):
         instrument_context = build_instrument_context(state["company_of_interest"])
 
         tools = [
-            get_stock_data,
+            get_stock_summary,
             get_indicators,
+            get_stock_data,
         ]
 
-        system_message = (
+        # Static: instructions + policy — cached across all ticker runs for the same session.
+        # Indicator descriptions alone are ~2000 chars; with learned rules this reliably exceeds
+        # the 2048-token Anthropic prompt-caching minimum.
+        static_system = (
+            "You are a helpful AI assistant, collaborating with other assistants."
+            " Use the provided tools to progress towards answering the question."
+            " If you are unable to fully answer, that's OK; another assistant with different tools"
+            " will help where you left off. Execute what you can to make progress."
+            " If you or any other assistant has the FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** or deliverable,"
+            " prefix your response with FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** so the team knows to stop."
+            f" You have access to the following tools: {', '.join([t.name for t in tools])}.\n"
             """You are a trading assistant tasked with analyzing financial markets. Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **8 indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
 
 Moving Averages:
@@ -45,37 +57,21 @@ Volatility Indicators:
 Volume-Based Indicators:
 - vwma: VWMA: A moving average weighted by volume. Usage: Confirm trends by integrating price action with volume data. Tips: Watch for skewed results from volume spikes; use in combination with other volume analyses.
 
-- Select indicators that provide diverse and complementary information. Avoid redundancy (e.g., do not select both rsi and stochrsi). Also briefly explain why they are suitable for the given market context. When you tool call, please use the exact name of the indicators provided above as they are defined parameters, otherwise your call will fail. Please make sure to call get_stock_data first to retrieve the CSV that is needed to generate indicators. Then use get_indicators with the specific indicator names. Write a very detailed and nuanced report of the trends you observe. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
-            + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
+- Select indicators that provide diverse and complementary information. Avoid redundancy (e.g., do not select both rsi and stochrsi). Also briefly explain why they are suitable for the given market context. When you tool call, please use the exact name of the indicators provided above as they are defined parameters, otherwise your call will fail. Start by calling get_stock_summary to get the price context and recent OHLCV needed to orient your analysis. Then use get_indicators with the specific indicator names. Only call get_stock_data if you need the full multi-year price history for a specific reason. Write a very detailed and nuanced report of the trends you observe. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
+            + " Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."
             + get_investor_policy_analyst_supplement()
             + get_language_instruction()
         )
+        # Dynamic: date + ticker change per call — kept outside the cached block
+        dynamic_system = f"For your reference, the current date is {current_date}. {instrument_context}"
 
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    "You are a helpful AI assistant, collaborating with other assistants."
-                    " Use the provided tools to progress towards answering the question."
-                    " If you are unable to fully answer, that's OK; another assistant with different tools"
-                    " will help where you left off. Execute what you can to make progress."
-                    " If you or any other assistant has the FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** or deliverable,"
-                    " prefix your response with FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** so the team knows to stop."
-                    " You have access to the following tools: {tool_names}.\n{system_message}"
-                    "For your reference, the current date is {current_date}. {instrument_context}",
-                ),
-                MessagesPlaceholder(variable_name="messages"),
-            ]
-        )
+        system_msg = SystemMessage(content=[
+            {"type": "text", "text": static_system, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": dynamic_system},
+        ])
 
-        prompt = prompt.partial(system_message=system_message)
-        prompt = prompt.partial(tool_names=", ".join([tool.name for tool in tools]))
-        prompt = prompt.partial(current_date=current_date)
-        prompt = prompt.partial(instrument_context=instrument_context)
-
-        chain = prompt | llm.bind_tools(tools)
-
-        result = chain.invoke(state["messages"])
+        chain = llm.bind_tools(tools)
+        result = chain.invoke([system_msg] + list(state["messages"]))
 
         report = ""
 

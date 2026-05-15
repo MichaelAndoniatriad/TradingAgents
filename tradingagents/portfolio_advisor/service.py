@@ -329,8 +329,8 @@ def _run_job(j: Dict[str, Any], cfg: Dict[str, Any], live: set, trade_date: str)
             try:
                 from tradingagents.portfolio_advisor.action_log import ingest_from_analysis
                 ingest_from_analysis(cfg, tid, dec, source="full_graph")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("ingest_from_analysis failed for %s: %s", tid, e)
             _save_job_outcome(cfg, jid, "completed")
             verdict = messaging.ntfy_verdict(dec, tid)
             return {"ticker": tid, "status": "completed", "verdict": verdict}
@@ -339,8 +339,8 @@ def _run_job(j: Dict[str, Any], cfg: Dict[str, Any], live: set, trade_date: str)
             try:
                 from tradingagents.portfolio_advisor.action_log import ingest_from_analysis
                 ingest_from_analysis(cfg, tid, analysis_text or "", source=f"single_model_{job_type}")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("ingest_from_analysis failed for %s: %s", tid, e)
             _save_job_outcome(cfg, jid, "completed")
             verdict = messaging.ntfy_verdict(analysis_text or "", tid)
             return {"ticker": tid, "status": "completed", "verdict": verdict}
@@ -380,36 +380,35 @@ def run_due_jobs(cfg: Dict[str, Any]) -> int:
         logger.error("run_due: cannot fetch portfolio: %s", e)
         return 0
 
-    st = state.load_state(cfg)
-    now = _utc_now()
-    due: List[Dict[str, Any]] = []
-    for j in state.list_pending_jobs(st):
-        try:
-            if _parse_iso(str(j.get("scheduled_at") or "")) <= now:
-                due.append(j)
-        except ValueError:
-            continue
-    due.sort(key=lambda x: str(x.get("scheduled_at") or ""))
-    due = due[:max_run]
-
-    if not due:
-        return 0
-
-    # Deduplicate: one job per ticker (take the oldest due)
-    seen_tickers: set = set()
-    deduped: List[Dict[str, Any]] = []
-    for j in due:
-        tid = str(j.get("ticker") or "").strip().upper()
-        if tid and tid not in seen_tickers:
-            seen_tickers.add(tid)
-            deduped.append(j)
-    due = deduped[:max_run]
-
-    # Claim all jobs immediately so concurrent cron ticks don't re-pick them
+    # Hold the lock across select + claim so concurrent cron ticks cannot pick the same job.
     with _state_lock:
-        st2 = state.load_state(cfg)
-        state.claim_jobs_for_run(st2, [j.get("id") for j in due])
-        state.save_state(cfg, st2)
+        st = state.load_state(cfg)
+        now = _utc_now()
+        due: List[Dict[str, Any]] = []
+        for j in state.list_pending_jobs(st):
+            try:
+                if _parse_iso(str(j.get("scheduled_at") or "")) <= now:
+                    due.append(j)
+            except ValueError:
+                continue
+        due.sort(key=lambda x: str(x.get("scheduled_at") or ""))
+        due = due[:max_run]
+
+        if not due:
+            return 0
+
+        # Deduplicate: one job per ticker (take the oldest due)
+        seen_tickers: set = set()
+        deduped: List[Dict[str, Any]] = []
+        for j in due:
+            tid = str(j.get("ticker") or "").strip().upper()
+            if tid and tid not in seen_tickers:
+                seen_tickers.add(tid)
+                deduped.append(j)
+        due = deduped[:max_run]
+
+        state.claim_jobs_for_run(st, [j.get("id") for j in due])
+        state.save_state(cfg, st)
 
     trade_date = date.today().isoformat()
     job_results: List[Dict[str, Any]] = []

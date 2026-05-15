@@ -1,5 +1,22 @@
 from datetime import datetime
+from io import StringIO
+import pandas as pd
 from .alpha_vantage_common import _make_api_request, _filter_csv_by_date_range
+
+
+def _round_price_columns(csv_str: str) -> str:
+    """Round OHLC price columns in a CSV string to 2 decimal places."""
+    if not csv_str or not csv_str.strip():
+        return csv_str
+    try:
+        df = pd.read_csv(StringIO(csv_str))
+        price_cols = [c for c in ["open", "high", "low", "close", "adjusted_close"] if c in df.columns]
+        if price_cols:
+            df[price_cols] = df[price_cols].round(2)
+        return df.to_csv(index=False)
+    except Exception:
+        return csv_str
+
 
 def get_stock(
     symbol: str,
@@ -35,4 +52,5 @@ def get_stock(
 
     response = _make_api_request("TIME_SERIES_DAILY_ADJUSTED", params)
 
-    return _filter_csv_by_date_range(response, start_date, end_date)
+    csv_str = _filter_csv_by_date_range(response, start_date, end_date)
+    return _round_price_columns(csv_str)

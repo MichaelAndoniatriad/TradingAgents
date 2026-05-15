@@ -58,8 +58,12 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
 
     config = get_config()
     curr_date_dt = pd.to_datetime(curr_date)
+    trade_date_str = curr_date_dt.strftime("%Y-%m-%d")
 
-    # Cache uses a fixed window (15y to today) so one file per symbol
+    ttl_hours = float(os.environ.get("OHLCV_CACHE_TTL_HOURS", "8"))
+
+    # Cache uses a fixed window (5y to today), keyed by trade date so each
+    # trading day gets its own file and stale data is never served.
     today_date = pd.Timestamp.today()
     start_date = today_date - pd.DateOffset(years=5)
     start_str = start_date.strftime("%Y-%m-%d")
@@ -68,10 +72,15 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     os.makedirs(config["data_cache_dir"], exist_ok=True)
     data_file = os.path.join(
         config["data_cache_dir"],
-        f"{safe_symbol}-YFin-data-{start_str}-{end_str}.csv",
+        f"{safe_symbol}-YFin-data-{start_str}-{end_str}-{trade_date_str}.csv",
     )
 
-    if os.path.exists(data_file):
+    cache_valid = (
+        os.path.exists(data_file)
+        and (time.time() - os.path.getmtime(data_file)) < ttl_hours * 3600
+    )
+
+    if cache_valid:
         data = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
     else:
         data = yf_retry(lambda: yf.download(

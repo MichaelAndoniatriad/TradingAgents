@@ -113,12 +113,12 @@ def _sync_partial_unit_changes(
     cfg: Dict[str, Any],
     live: Set[str],
     rows: List[Dict[str, Any]],
-) -> None:
+) -> Optional[Dict[str, Any]]:
     """Detect same ticker still open with lower total units than last snapshot.
 
-    Always calls ``pa_state.load_state`` here so ``last_book_units_by_ticker`` is read
-    from disk. Callers do not need to pass state in: prior snapshots persist across
-    ``run_due_jobs`` even when that function loads advisor state only after this routine.
+    Returns the mutated state dict so the caller can save it — does not call
+    ``pa_state.save_state`` internally to avoid overwriting concurrent mutations.
+    Returns None when there is nothing to do (empty rows).
     """
     if not rows:
         return
@@ -175,7 +175,7 @@ def _sync_partial_unit_changes(
             },
         )
     st["last_book_units_by_ticker"] = {k: float(v) for k, v in current.items()}
-    pa_state.save_state(cfg, st)
+    return st
 
 
 def auto_close_outcomes(
@@ -192,9 +192,11 @@ def auto_close_outcomes(
     """
     if rows is not None:
         try:
-            _sync_partial_unit_changes(cfg, live, rows)
-        except Exception:
-            logger.debug("partial unit sync failed", exc_info=True)
+            mutated_st = _sync_partial_unit_changes(cfg, live, rows)
+            if mutated_st is not None:
+                pa_state.save_state(cfg, mutated_st)
+        except Exception as e:
+            logger.warning("outcome_sync: partial unit sync failed: %s", e)
 
     mem = TradingMemoryLog(cfg)
     today = date.today()

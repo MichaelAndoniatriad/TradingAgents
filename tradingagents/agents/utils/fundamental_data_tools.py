@@ -75,3 +75,23 @@ def get_income_statement(
         str: A formatted report containing income statement data
     """
     return route_to_vendor("get_income_statement", ticker, freq, curr_date)
+
+
+@tool
+def get_fundamentals_summary(
+    ticker: Annotated[str, "ticker symbol"],
+    curr_date: Annotated[str, "current date you are trading at, yyyy-mm-dd"] = None,
+) -> str:
+    """
+    Retrieve a concise fundamentals summary for a given ticker symbol.
+    Returns key metrics only: revenue (last 4Q + YoY growth), gross margin, operating margin,
+    net income (last 4Q), free cash flow (last 4Q), total debt, debt/equity ratio,
+    and EPS (last 4Q + YoY growth). Use this as the default fundamentals tool.
+    Prefer this over get_balance_sheet + get_income_statement to reduce prompt size.
+    Args:
+        ticker (str): Ticker symbol of the company
+        curr_date (str): Current date you are trading at, yyyy-mm-dd
+    Returns:
+        str: Concise fundamentals summary with key financial metrics
+    """
+    return route_to_vendor("get_fundamentals_summary", ticker, curr_date)

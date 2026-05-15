@@ -35,9 +35,18 @@ def _row_for_ticker(rows: List[Dict[str, Any]], ticker: str) -> Optional[Dict[st
     return None
 
 
+def _validate_etoro_row(row: Dict[str, Any], required_fields: List[str]) -> bool:
+    missing = [f for f in required_fields if f not in row]
+    if missing:
+        logger.warning("eToro row missing fields %s: %r", missing, row)
+        return False
+    return True
+
+
 def _entry_price(row: Optional[Dict[str, Any]]) -> float:
     if not row:
         return 0.0
+    _validate_etoro_row(row, ["openRate"])
     v = row.get("openRate")
     try:
         return float(v)
@@ -80,6 +89,7 @@ def weighted_avg_open_for_lots(rows_for_sym: List[Dict[str, Any]]) -> float:
     num = 0.0
     den = 0.0
     for r in rows_for_sym:
+        _validate_etoro_row(r, ["openRate", "units"])
         er = _entry_price(r)
         try:
             u = float(r.get("units") or 0.0)

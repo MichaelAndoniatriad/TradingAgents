@@ -9,6 +9,8 @@ from .y_finance import (
     get_cashflow as get_yfinance_cashflow,
     get_income_statement as get_yfinance_income_statement,
     get_insider_transactions as get_yfinance_insider_transactions,
+    get_stock_summary as get_yfinance_stock_summary,
+    get_fundamentals_summary as get_yfinance_fundamentals_summary,
 )
 from .yfinance_news import get_news_yfinance, get_global_news_yfinance
 from .alpha_vantage import (
@@ -32,7 +34,8 @@ TOOLS_CATEGORIES = {
     "core_stock_apis": {
         "description": "OHLCV stock price data",
         "tools": [
-            "get_stock_data"
+            "get_stock_data",
+            "get_stock_summary",
         ]
     },
     "technical_indicators": {
@@ -47,7 +50,8 @@ TOOLS_CATEGORIES = {
             "get_fundamentals",
             "get_balance_sheet",
             "get_cashflow",
-            "get_income_statement"
+            "get_income_statement",
+            "get_fundamentals_summary",
         ]
     },
     "news_data": {
@@ -72,6 +76,10 @@ VENDOR_METHODS = {
         "alpha_vantage": get_alpha_vantage_stock,
         "yfinance": get_YFin_data_online,
     },
+    "get_stock_summary": {
+        "yfinance": get_yfinance_stock_summary,
+        "alpha_vantage": get_yfinance_stock_summary,  # no AV impl; fall through to yfinance
+    },
     # technical_indicators
     "get_indicators": {
         "alpha_vantage": get_alpha_vantage_indicator,
@@ -93,6 +101,10 @@ VENDOR_METHODS = {
     "get_income_statement": {
         "alpha_vantage": get_alpha_vantage_income_statement,
         "yfinance": get_yfinance_income_statement,
+    },
+    "get_fundamentals_summary": {
+        "yfinance": get_yfinance_fundamentals_summary,
+        "alpha_vantage": get_yfinance_fundamentals_summary,  # no AV impl; fall through to yfinance
     },
     # news_data
     "get_news": {

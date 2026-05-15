@@ -7,6 +7,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +25,7 @@ from tradingagents.portfolio_advisor.models import AdvisorPMCycleResult
 from tradingagents.portfolio_advisor.prompt_limits import cfg_int as _pm_int
 
 logger = logging.getLogger(__name__)
+_pm_memory_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # PM_CLAUDE.md + PM_MEMORY.md — structured memory system for the PM
@@ -311,8 +313,6 @@ def _append_pm_memory_md(
     result: AdvisorPMCycleResult,
     actions_taken: Optional[Dict[str, Any]] = None,
 ) -> None:
-    path = pm_memory_path(cfg)
-    path.parent.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [
         f"{_PM_ADVISOR_SENTINEL}\n",
@@ -343,8 +343,11 @@ def _append_pm_memory_md(
     block = "".join(lines)
     if _pm_unified_memory(cfg) and isinstance(cfg.get("memory_log_path"), str) and str(cfg["memory_log_path"]).strip():
         block = block + TradingMemoryLog._SEPARATOR
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(block)
+    with _pm_memory_lock:
+        path = pm_memory_path(cfg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(block)
 
 
 def _prior_pm_context(cfg: Dict[str, Any]) -> str:
@@ -671,7 +674,7 @@ def _trigger_run_due_async() -> None:
             env=env,
         )
     except Exception as e:
-        logger.debug("_trigger_run_due_async failed: %s", e)
+        logger.warning("Failed to trigger async run-due: %s", e)
 
 
 def _notify_action_stances(cfg: Dict[str, Any], result: AdvisorPMCycleResult) -> None:

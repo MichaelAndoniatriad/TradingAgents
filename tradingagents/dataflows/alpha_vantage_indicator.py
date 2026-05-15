@@ -1,4 +1,5 @@
 from .alpha_vantage_common import _make_api_request
+from .utils import normalize_date
 
 def get_indicator(
     symbol: str,
@@ -187,8 +188,7 @@ def get_indicator(
             values = line.split(',')
             if len(values) > value_col_idx:
                 try:
-                    date_str = values[date_col_idx].strip()
-                    # Parse the date
+                    date_str = normalize_date(values[date_col_idx].strip())
                     date_dt = datetime.strptime(date_str, "%Y-%m-%d")
 
                     # Check if date is in our range

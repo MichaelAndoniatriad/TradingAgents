@@ -61,6 +61,25 @@ def decorate_all_methods(decorator):
     return class_decorator
 
 
+def normalize_date(date_str: str) -> str:
+    """Normalize a date string to ISO 8601 YYYY-MM-DD.
+
+    Handles Alpha Vantage compact format (YYYYMMDDTHHMM / YYYYMMDDTHHMMSS),
+    ISO 8601 with a time component (YYYY-MM-DDTHH:MM:SS), and plain
+    YYYY-MM-DD pass-through. Returns only the date portion.
+    """
+    if not date_str:
+        return date_str
+    date_str = date_str.strip()
+    # Alpha Vantage compact: "20231215T1300" or "20231215T130000"
+    if len(date_str) >= 9 and date_str[8:9] == "T" and date_str[:8].isdigit():
+        return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+    # ISO with time component: "2023-12-15T13:00:00" or "2023-12-15 13:00:00"
+    if len(date_str) > 10 and date_str[4:5] == "-":
+        return date_str[:10]
+    return date_str
+
+
 def get_next_weekday(date):
 
     if not isinstance(date, datetime):

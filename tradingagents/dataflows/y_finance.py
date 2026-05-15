@@ -405,18 +405,221 @@ def get_insider_transactions(
     try:
         ticker_obj = yf.Ticker(ticker.upper())
         data = yf_retry(lambda: ticker_obj.insider_transactions)
-        
+
         if data is None or data.empty:
             return f"No insider transactions data found for symbol '{ticker}'"
-            
+
         # Convert to CSV string for consistency with other functions
         csv_string = data.to_csv()
-        
+
         # Add header information
         header = f"# Insider Transactions data for {ticker.upper()}\n"
         header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        
+
         return header + csv_string
-        
+
     except Exception as e:
         return f"Error retrieving insider transactions for {ticker}: {str(e)}"
+
+
+def get_stock_summary(
+    symbol: Annotated[str, "ticker symbol of the company"],
+    curr_date: Annotated[str, "current trading date, YYYY-MM-DD"],
+    days: Annotated[int, "number of recent trading days to include in OHLCV table"] = 60,
+) -> str:
+    """Return a concise OHLCV summary: last N days, 52-week range, SMA context, and trend direction.
+
+    Use this instead of get_stock_data to avoid injecting the full 5-year CSV into the prompt.
+    """
+    try:
+        data = load_ohlcv(symbol, curr_date)
+        if data.empty:
+            return f"No data found for {symbol}"
+
+        data = data.copy()
+        data["Date"] = pd.to_datetime(data["Date"])
+        data = data.sort_values("Date").reset_index(drop=True)
+
+        close = data["Close"]
+        current_price = round(float(close.iloc[-1]), 2)
+
+        # 52-week range
+        one_year_ago = pd.to_datetime(curr_date) - pd.DateOffset(weeks=52)
+        year_data = data[data["Date"] >= one_year_ago]
+        week52_high = round(float(year_data["High"].max()), 2) if not year_data.empty else None
+        week52_low = round(float(year_data["Low"].min()), 2) if not year_data.empty else None
+
+        # SMAs
+        sma50 = round(float(close.tail(50).mean()), 2) if len(close) >= 50 else round(float(close.mean()), 2)
+        sma200 = round(float(close.tail(200).mean()), 2) if len(close) >= 200 else round(float(close.mean()), 2)
+
+        # Volume
+        avg_vol_30d = int(data["Volume"].tail(30).mean())
+        avg_vol_full = int(data["Volume"].mean())
+
+        # Trend direction based on SMA relationships
+        if current_price > sma50 and sma50 > sma200:
+            trend = "uptrend (price > 50 SMA > 200 SMA)"
+        elif current_price < sma50 and sma50 < sma200:
+            trend = "downtrend (price < 50 SMA < 200 SMA)"
+        elif current_price > sma50 and sma50 < sma200:
+            trend = "mixed/recovering (price above 50 SMA, but 50 SMA still below 200 SMA)"
+        elif current_price < sma50 and sma50 > sma200:
+            trend = "mixed/weakening (price below 50 SMA, but 50 SMA still above 200 SMA)"
+        else:
+            trend = "sideways"
+
+        lines = [
+            f"# Stock Summary for {symbol.upper()} as of {curr_date}",
+            f"Current Price: {current_price}",
+            f"52-Week High: {week52_high if week52_high is not None else 'N/A'}",
+            f"52-Week Low: {week52_low if week52_low is not None else 'N/A'}",
+            f"50-Day SMA: {sma50} (price is {'above' if current_price > sma50 else 'below'})",
+            f"200-Day SMA: {sma200} (price is {'above' if current_price > sma200 else 'below'})",
+            f"30-Day Avg Volume: {avg_vol_30d:,}",
+            f"Full-Period Avg Volume: {avg_vol_full:,}",
+            f"Trend: {trend}",
+            f"",
+            f"## Last {days} Trading Days (OHLCV)",
+        ]
+
+        recent = data.tail(days).copy()
+        recent["Date"] = recent["Date"].dt.strftime("%Y-%m-%d")
+        for col in ["Open", "High", "Low", "Close"]:
+            if col in recent.columns:
+                recent[col] = recent[col].round(2)
+
+        return "\n".join(lines) + "\n" + recent.to_csv(index=False)
+
+    except Exception as e:
+        return f"Error retrieving stock summary for {symbol}: {str(e)}"
+
+
+def get_fundamentals_summary(
+    ticker: Annotated[str, "ticker symbol of the company"],
+    curr_date: Annotated[str, "current date in YYYY-MM-DD format"] = None,
+) -> str:
+    """Return key financial metrics extracted from income statement, balance sheet, and cash flow.
+
+    Returns revenue trend, margins, net income, FCF, debt, and EPS for the last 4 quarters.
+    Use this instead of get_balance_sheet + get_income_statement to reduce prompt size.
+    """
+    try:
+        ticker_obj = yf.Ticker(ticker.upper())
+
+        income_q = yf_retry(lambda: ticker_obj.quarterly_income_stmt)
+        balance_q = yf_retry(lambda: ticker_obj.quarterly_balance_sheet)
+        cashflow_q = yf_retry(lambda: ticker_obj.quarterly_cashflow)
+        info = yf_retry(lambda: ticker_obj.info) or {}
+
+        income_q = filter_financials_by_date(income_q, curr_date)
+        balance_q = filter_financials_by_date(balance_q, curr_date)
+        cashflow_q = filter_financials_by_date(cashflow_q, curr_date)
+
+        lines = [f"# Fundamentals Summary for {ticker.upper()}"]
+        if curr_date:
+            lines.append(f"# As of {curr_date}")
+        lines.append("")
+
+        def _fmt_m(val):
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                return "N/A"
+            return f"${val / 1e6:.1f}M"
+
+        def _fmt_pct(val):
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                return "N/A"
+            return f"{val * 100:.1f}%"
+
+        def _get_row(df, *names):
+            for name in names:
+                if not df.empty and name in df.index:
+                    return df.loc[name]
+            return None
+
+        def _col_label(col):
+            try:
+                return pd.Timestamp(col).strftime("%Y-%m")
+            except Exception:
+                return str(col)
+
+        # Revenue — last 4 quarters + YoY growth
+        revenue = _get_row(income_q, "Total Revenue")
+        if revenue is not None:
+            cols = revenue.dropna().index[:4]
+            lines.append("## Revenue (last 4 quarters)")
+            for col in cols:
+                lines.append(f"  {_col_label(col)}: {_fmt_m(revenue[col])}")
+            if len(cols) >= 4:
+                v0, v3 = revenue[cols[0]], revenue[cols[3]]
+                if v3 and not pd.isna(v3) and v3 != 0:
+                    lines.append(f"  YoY Growth (latest vs 4Q ago): {_fmt_pct((v0 - v3) / abs(v3))}")
+            lines.append("")
+
+        # Gross Margin and Operating Margin (latest quarter)
+        gross_profit = _get_row(income_q, "Gross Profit")
+        op_income = _get_row(income_q, "Operating Income", "EBIT")
+        if revenue is not None:
+            latest_col = revenue.dropna().index[:1]
+            if len(latest_col) > 0:
+                col = latest_col[0]
+                rev_val = revenue.get(col)
+                if rev_val and not pd.isna(rev_val) and rev_val != 0:
+                    if gross_profit is not None and col in gross_profit.index:
+                        lines.append(f"Gross Margin (latest Q): {_fmt_pct(gross_profit[col] / rev_val)}")
+                    if op_income is not None and col in op_income.index:
+                        lines.append(f"Operating Margin (latest Q): {_fmt_pct(op_income[col] / rev_val)}")
+            lines.append("")
+
+        # Net Income — last 4 quarters
+        net_income = _get_row(income_q, "Net Income")
+        if net_income is not None:
+            cols = net_income.dropna().index[:4]
+            lines.append("## Net Income (last 4 quarters)")
+            for col in cols:
+                lines.append(f"  {_col_label(col)}: {_fmt_m(net_income[col])}")
+            lines.append("")
+
+        # Free Cash Flow — last 4 quarters
+        fcf = _get_row(cashflow_q, "Free Cash Flow")
+        if fcf is None:
+            # Fallback: Operating CF - CapEx
+            ocf = _get_row(cashflow_q, "Operating Cash Flow")
+            capex = _get_row(cashflow_q, "Capital Expenditure")
+            if ocf is not None and capex is not None:
+                fcf = ocf.add(capex, fill_value=0)
+        if fcf is not None:
+            cols = fcf.dropna().index[:4]
+            lines.append("## Free Cash Flow (last 4 quarters)")
+            for col in cols:
+                lines.append(f"  {_col_label(col)}: {_fmt_m(fcf[col])}")
+            lines.append("")
+
+        # Total Debt and Debt/Equity
+        total_debt = _get_row(balance_q, "Total Debt", "Long Term Debt")
+        if total_debt is not None:
+            cols = total_debt.dropna().index[:1]
+            if len(cols) > 0:
+                lines.append(f"Total Debt (latest Q): {_fmt_m(total_debt[cols[0]])}")
+        de_ratio = info.get("debtToEquity")
+        if de_ratio is not None:
+            lines.append(f"Debt/Equity Ratio: {de_ratio:.2f}")
+        lines.append("")
+
+        # EPS — last 4 quarters + YoY growth
+        eps = _get_row(income_q, "Diluted EPS", "Basic EPS")
+        if eps is not None:
+            cols = eps.dropna().index[:4]
+            lines.append("## EPS (last 4 quarters)")
+            for col in cols:
+                val = eps[col]
+                lines.append(f"  {_col_label(col)}: {'N/A' if pd.isna(val) else f'{val:.2f}'}")
+            if len(cols) >= 4:
+                v0, v3 = eps[cols[0]], eps[cols[3]]
+                if not pd.isna(v0) and not pd.isna(v3) and v3 != 0:
+                    lines.append(f"  YoY Growth (latest vs 4Q ago): {_fmt_pct((v0 - v3) / abs(v3))}")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"Error retrieving fundamentals summary for {ticker}: {str(e)}"
