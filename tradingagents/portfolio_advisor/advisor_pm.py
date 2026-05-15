@@ -200,7 +200,7 @@ def _compact_portfolio_snapshot(portfolio_text: str, rows: List[Dict[str, Any]])
         item: Dict[str, Any] = {"t": ticker, "side": side}
         ubv = r.get("unitsBaseValueDollars")
         if ubv is not None:
-            item["val$"] = round(float(ubv), 2)
+            item["capital$"] = round(float(ubv), 2)
         if ubv is not None and total_ubv:
             item["pct"] = round(float(ubv) / total_ubv * 100, 1)
         units = r.get("units")
@@ -219,6 +219,11 @@ def _compact_portfolio_snapshot(portfolio_text: str, rows: List[Dict[str, Any]])
         upnl = r.get("unrealizedPnL")
         if upnl is not None:
             item["upnl$"] = round(float(upnl), 2)
+        if ubv is not None and upnl is not None:
+            try:
+                item["current$"] = round(float(ubv) + float(upnl), 2)
+            except (TypeError, ValueError):
+                pass
         if upnl is not None and init is not None and float(init) != 0:
             item["upnl%"] = round(float(upnl) / float(init) * 100, 1)
         items.append(item)
@@ -282,33 +287,49 @@ def _format_close_instruction(ticker: str, stance: str, rationale: str, rows: Li
         selected = lots
 
     total_units = sum((_float_or_none(l.get("units")) or 0.0) for l in selected)
-    total_value = sum((_float_or_none(l.get("unitsBaseValueDollars")) or 0.0) for l in selected)
+    total_capital = sum((_float_or_none(l.get("unitsBaseValueDollars")) or 0.0) for l in selected)
+    total_current = sum(
+        (_float_or_none(l.get("unitsBaseValueDollars")) or 0.0)
+        + (_float_or_none(l.get("unrealizedPnL")) or 0.0)
+        for l in selected
+    )
 
     if stance == "sell":
         header = (
-            f"Close {len(selected)} {ticker} position(s): {_num(total_units)} units, about {_money(total_value)}."
+            f"Close {len(selected)} {ticker} position(s): {_num(total_units)} units, "
+            f"about {_money(total_current)} current value ({_money(total_capital)} capital/base)."
         )
     else:
         if not selected:
             lot_count = len(lots)
             total_all_units = sum((_float_or_none(l.get("units")) or 0.0) for l in lots)
-            total_all_value = sum((_float_or_none(l.get("unitsBaseValueDollars")) or 0.0) for l in lots)
+            total_all_capital = sum((_float_or_none(l.get("unitsBaseValueDollars")) or 0.0) for l in lots)
+            total_all_current = sum(
+                (_float_or_none(l.get("unitsBaseValueDollars")) or 0.0)
+                + (_float_or_none(l.get("unrealizedPnL")) or 0.0)
+                for l in lots
+            )
             return (
                 f"Trim requested but no exact lots/amount were specified. Open {ticker} lots: "
-                f"{lot_count} position(s), {_num(total_all_units)} units, about {_money(total_all_value)}. "
+                f"{lot_count} position(s), {_num(total_all_units)} units, about {_money(total_all_current)} "
+                f"current value ({_money(total_all_capital)} capital/base). "
                 "Ask PM for exact trim size before executing."
             )
         header = (
-            f"Trim by closing these {len(selected)} {ticker} lot(s): {_num(total_units)} units, about {_money(total_value)}."
+            f"Trim by closing these {len(selected)} {ticker} lot(s): {_num(total_units)} units, "
+            f"about {_money(total_current)} current value ({_money(total_capital)} capital/base)."
         )
 
     details = []
     for lot in selected[:8]:
         pid = lot.get("positionId")
         pid_s = f"id {pid}, " if pid not in (None, "") else ""
+        capital = _float_or_none(lot.get("unitsBaseValueDollars"))
+        upnl = _float_or_none(lot.get("unrealizedPnL"))
+        current = (capital + upnl) if capital is not None and upnl is not None else None
         details.append(
             f"{pid_s}{_num(lot.get('units'))} units opened at {_money(lot.get('openRate'))}, "
-            f"value {_money(lot.get('unitsBaseValueDollars'))}, P/L {_money(lot.get('unrealizedPnL'))}"
+            f"current {_money(current)}, capital/base {_money(capital)}, P/L {_money(upnl)}"
         )
     if len(selected) > 8:
         details.append(f"... plus {len(selected) - 8} more lot(s)")
@@ -1342,8 +1363,9 @@ Structured output fields (use defaults when unsure):
   to the human's phone, so only fill it when you genuinely have something they need to know unprompted.
   Do not repeat the same action already present in prior PM context unless the exact required close list changed.
 
-IMPORTANT — position sizing: the portfolio snapshot above includes val$ (current USD value), units (shares held),
-open$ (cost basis per share), and total_portfolio_value_usd. When you recommend trimming or selling, always express
+IMPORTANT — position sizing: the portfolio snapshot above includes capital$ (cash/base committed), current$
+(capital plus unrealized P/L when available), units (shares held), open$ (cost basis per share), and
+total_portfolio_value_usd. When you recommend trimming or selling, always express
 the action as a specific dollar amount AND share count drawn from that data — never just a percentage like "trim to 2%".
 Example: "Sell 3 units of TEAM (~$240) — reduces exposure from $720 to $480." The human does not know what 2% of the
 portfolio is in dollars; give them the exact number so they can act immediately. If you mean "close", list exactly

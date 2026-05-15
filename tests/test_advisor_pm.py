@@ -82,6 +82,7 @@ def test_format_close_instruction_lists_exact_sell_lots():
 
     assert "Close 2 TEAM position(s)" in out
     assert "3.5 units" in out
+    assert "about $244 current value ($307 capital/base)" in out
     assert "id 101" in out
     assert "opened at $167" in out
     assert "id 102" in out
@@ -93,7 +94,16 @@ def test_notify_action_stances_suppresses_unchanged_repeats(tmp_path):
         executive_summary="x",
         stances=[AdvisorPMTickerStance(ticker="TEAM", stance="sell", rationale="Exit TEAM.")],
     )
-    rows = [{"symbolFull": "TEAM", "positionId": 1, "openRate": 100, "units": 2, "unitsBaseValueDollars": 180}]
+    rows = [
+        {
+            "symbolFull": "TEAM",
+            "positionId": 1,
+            "openRate": 100,
+            "units": 2,
+            "unitsBaseValueDollars": 180,
+            "unrealizedPnL": -20,
+        }
+    ]
 
     with patch("tradingagents.portfolio_advisor.messaging.send_advisor_message") as send:
         _notify_action_stances(cfg, res, rows)
