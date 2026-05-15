@@ -162,7 +162,7 @@ def pm_memory_path(cfg: Dict[str, Any]) -> Path:
 
 
 def _compact_portfolio_snapshot(portfolio_text: str, rows: List[Dict[str, Any]]) -> str:
-    """Build compact portfolio summary from raw eToro rows. Target: under 800 chars."""
+    """Build compact portfolio summary from raw eToro rows. Target: under 1200 chars."""
     first_line = (portfolio_text or "").split("\n")[0].strip()
     if not rows:
         return first_line or "(portfolio empty)"
@@ -174,15 +174,32 @@ def _compact_portfolio_snapshot(portfolio_text: str, rows: List[Dict[str, Any]])
         side = "L" if r.get("isBuy") is True else ("S" if r.get("isBuy") is False else "?")
         item: Dict[str, Any] = {"t": ticker, "side": side}
         ubv = r.get("unitsBaseValueDollars")
+        if ubv is not None:
+            item["val$"] = round(float(ubv), 2)
         if ubv is not None and total_ubv:
             item["pct"] = round(float(ubv) / total_ubv * 100, 1)
+        units = r.get("units")
+        if units is not None:
+            try:
+                item["units"] = round(float(units), 4)
+            except (TypeError, ValueError):
+                pass
+        open_rate = r.get("openRate")
+        if open_rate is not None:
+            try:
+                item["open$"] = round(float(open_rate), 4)
+            except (TypeError, ValueError):
+                pass
         init = r.get("initialAmountInDollars")
         upnl = r.get("unrealizedPnL")
+        if upnl is not None:
+            item["upnl$"] = round(float(upnl), 2)
         if upnl is not None and init is not None and float(init) != 0:
             item["upnl%"] = round(float(upnl) / float(init) * 100, 1)
         items.append(item)
+    total_line = f"total_portfolio_value_usd={round(total_ubv, 2)}" if total_ubv else ""
     body = json.dumps(items, separators=(",", ":"), ensure_ascii=False)
-    return f"{first_line}\n{body}"
+    return f"{first_line}\n{total_line}\n{body}"
 
 
 def _trading_memory_digest_block(cfg: Dict[str, Any]) -> str:
@@ -836,6 +853,12 @@ Structured output fields (use defaults when unsure):
 - push_note: one short observation worth pushing to the human right now — deadline approaching, unexpected finding,
   stance change, catalyst within 48h. Max 280 chars. Leave empty if nothing urgent or new. This goes straight
   to the human's phone, so only fill it when you genuinely have something they need to know unprompted.
+
+IMPORTANT — position sizing: the portfolio snapshot above includes val$ (current USD value), units (shares held),
+open$ (cost basis per share), and total_portfolio_value_usd. When you recommend trimming or selling, always express
+the action as a specific dollar amount AND share count drawn from that data — never just a percentage like "trim to 2%".
+Example: "Sell 3 units of TEAM (~$240) — reduces exposure from $720 to $480." The human does not know what 2% of the
+portfolio is in dollars; give them the exact number so they can act immediately.
 
 Deliver structured output only. Stances must use tickers you see above. forward_tasks should be concrete
 (research X, schedule replan, verify Y thesis, respond to risk flag, etc.). memory_note is what you want your next self to read first.
