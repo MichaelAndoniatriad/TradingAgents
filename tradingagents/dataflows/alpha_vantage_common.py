@@ -117,6 +117,6 @@ def _filter_csv_by_date_range(csv_data: str, start_date: str, end_date: str) -> 
         return filtered_df.to_csv(index=False)
 
     except Exception as e:
-        # If filtering fails, return original data with a warning
-        print(f"Warning: Failed to filter CSV data by date range: {e}")
-        return csv_data
+        raise ValueError(
+            f"Failed to filter CSV data by date range (start={start_date!r}, end={end_date!r}): {e}"
+        ) from e
