@@ -62,6 +62,24 @@ def _price_df(prices):
     return pd.DataFrame({"Close": prices})
 
 
+def _prompt_to_str(prompt) -> str:
+    """Flatten a prompt (str or list of LangChain messages) to a single string for assertions."""
+    if isinstance(prompt, str):
+        return prompt
+    parts = []
+    for msg in prompt:
+        content = getattr(msg, "content", "")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    parts.append(str(block.get("text", "")))
+                else:
+                    parts.append(str(block))
+        else:
+            parts.append(str(content))
+    return "\n".join(parts)
+
+
 def _make_pm_state(past_context=""):
     """Minimal AgentState dict for portfolio_manager_node."""
     return {
@@ -689,8 +707,9 @@ class TestPortfolioManagerInjection:
         pm_node = create_portfolio_manager(llm)
         state = _make_pm_state(past_context="[2026-01-05 | NVDA | Buy | +5.0% | +2.0% | 5d]\nGreat call.")
         pm_node(state)
-        assert "Lessons from prior decisions and outcomes" in captured["prompt"]
-        assert "Great call." in captured["prompt"]
+        prompt_text = _prompt_to_str(captured["prompt"])
+        assert "Lessons from prior decisions and outcomes" in prompt_text
+        assert "Great call." in prompt_text
 
     def test_pm_no_past_context_no_section(self):
         """PM prompt omits the lessons section entirely when past_context is empty."""
@@ -699,7 +718,7 @@ class TestPortfolioManagerInjection:
         pm_node = create_portfolio_manager(llm)
         state = _make_pm_state(past_context="")
         pm_node(state)
-        assert "Lessons from prior decisions" not in captured["prompt"]
+        assert "Lessons from prior decisions" not in _prompt_to_str(captured["prompt"])
 
     def test_pm_returns_rendered_markdown_with_rating(self):
         """The structured PortfolioDecision is rendered to markdown that

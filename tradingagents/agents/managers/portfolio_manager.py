@@ -10,6 +10,8 @@ back gracefully to free-text generation.
 
 from __future__ import annotations
 
+from langchain_core.messages import HumanMessage, SystemMessage
+
 from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
@@ -40,41 +42,47 @@ def create_portfolio_manager(llm):
             else ""
         )
 
-        prompt = f"""You are the Portfolio Manager for a **single-name** advisory workflow.
+        # Static: role + scope + rating scale + policy — cached across all ticker runs for the same session.
+        static_system = (
+            "You are the Portfolio Manager for a **single-name** advisory workflow.\n\n"
+            "**Critical scope:** You do **not** execute trades, connect to a broker, or place orders. Your output is a **written plan** for the human: what stance to consider (Buy / Overweight / Hold / Underweight / Sell), how confident the evidence is, how to think about the name emotionally in a disciplined way, and what would change that view. The analysts and debate above are **inputs** you judge — not instructions to auto-trade.\n\n"
+            "---\n\n"
+            "**Advisory rating scale** (pick exactly one for the human's planning):\n"
+            "- **Buy**: Strong conviction to consider entering or adding (on their own timeline)\n"
+            "- **Overweight**: Favorable outlook; consider gradually increasing exposure\n"
+            "- **Hold**: Balanced or wait; no urgency to change sizing\n"
+            "- **Underweight**: Consider trimming or taking profits\n"
+            "- **Sell**: Consider full exit or avoiding new entry\n\n"
+            "Be decisive and ground every conclusion in specific evidence from the analysts.\n"
+            "Set **confidence** honestly from debate quality and data thickness.\n"
+            "In **investor_framing**, speak directly to the reader: calm, specific, no hype — how they should *feel* about uncertainty (patient monitoring vs genuine red flags).\n"
+            "If past lessons give a baseline, use **stance_vs_prior** to note what changed or stayed the same; otherwise leave it null.\n"
+            "Your executive summary must state 2-3 concrete thesis-break metrics for Notes (as required below) whenever a Buy or Overweight is justified; tie partial exits and trims to the exit policy when relevant."
+            + get_investor_policy_full_instruction()
+            + get_language_instruction()
+        )
+        # Dynamic: instrument context, plans, lessons, and debate history change per call.
+        dynamic_user = (
+            f"{instrument_context}\n\n"
+            f"---\n\n"
+            f"**Context:**\n"
+            f"- Research Manager's investment plan: **{research_plan}**\n"
+            f"- Trader's transaction proposal: **{trader_plan}**\n"
+            f"{lessons_line}\n"
+            f"**Risk Analysts Debate History:**\n{history}"
+        )
 
-**Critical scope:** You do **not** execute trades, connect to a broker, or place orders. Your output is a **written plan** for the human: what stance to consider (Buy / Overweight / Hold / Underweight / Sell), how confident the evidence is, how to think about the name emotionally in a disciplined way, and what would change that view. The analysts and debate above are **inputs** you judge — not instructions to auto-trade.
-
-{instrument_context}
-
----
-
-**Advisory rating scale** (pick exactly one for the human's planning):
-- **Buy**: Strong conviction to consider entering or adding (on their own timeline)
-- **Overweight**: Favorable outlook; consider gradually increasing exposure
-- **Hold**: Balanced or wait; no urgency to change sizing
-- **Underweight**: Consider trimming or taking profits
-- **Sell**: Consider full exit or avoiding new entry
-
-**Context:**
-- Research Manager's investment plan: **{research_plan}**
-- Trader's transaction proposal: **{trader_plan}**
-{lessons_line}
-**Risk Analysts Debate History:**
-{history}
-
----
-
-Be decisive and ground every conclusion in specific evidence from the analysts.
-Set **confidence** honestly from debate quality and data thickness.
-In **investor_framing**, speak directly to the reader: calm, specific, no hype — how they should *feel* about uncertainty (patient monitoring vs genuine red flags).
-If past lessons give a baseline, use **stance_vs_prior** to note what changed or stayed the same; otherwise leave it null.
-Your executive summary must state 2–3 concrete thesis-break metrics for Notes (as required below) whenever a Buy or Overweight is justified; tie partial exits and trims to the exit policy when relevant.
-{get_investor_policy_full_instruction()}{get_language_instruction()}"""
+        messages = [
+            SystemMessage(content=[
+                {"type": "text", "text": static_system, "cache_control": {"type": "ephemeral"}},
+            ]),
+            HumanMessage(content=dynamic_user),
+        ]
 
         final_trade_decision = invoke_structured_or_freetext(
             structured_llm,
             llm,
-            prompt,
+            messages,
             render_pm_decision,
             "Portfolio Manager",
         )

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from langchain_core.messages import HumanMessage, SystemMessage
+
 from tradingagents.agents.schemas import ResearchPlan, render_research_plan
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
@@ -23,31 +25,38 @@ def create_research_manager(llm):
 
         investment_debate_state = state["investment_debate_state"]
 
-        prompt = f"""As the Research Manager and debate facilitator, your role is to critically evaluate this round of debate and deliver a clear, actionable investment plan for the trader.
+        # Static: role + rating scale + policy — cached across all ticker runs for the same session.
+        static_system = (
+            "As the Research Manager and debate facilitator, your role is to critically evaluate this round of debate and deliver a clear, actionable investment plan for the trader.\n\n"
+            "---\n\n"
+            "**Rating Scale** (use exactly one):\n"
+            "- **Buy**: Strong conviction in the bull thesis; recommend taking or growing the position\n"
+            "- **Overweight**: Constructive view; recommend gradually increasing exposure\n"
+            "- **Hold**: Balanced view; recommend maintaining the current position\n"
+            "- **Underweight**: Cautious view; recommend trimming exposure\n"
+            "- **Sell**: Strong conviction in the bear thesis; recommend exiting or avoiding the position\n\n"
+            "Commit to a clear stance whenever the debate's strongest arguments warrant one; reserve Hold for situations where the evidence on both sides is genuinely balanced."
+            + get_investor_policy_full_instruction()
+            + get_language_instruction()
+        )
+        # Dynamic: instrument + debate history change per call.
+        dynamic_user = (
+            f"{instrument_context}\n\n"
+            f"---\n\n"
+            f"**Debate History:**\n{history}"
+        )
 
-{instrument_context}
-
----
-
-**Rating Scale** (use exactly one):
-- **Buy**: Strong conviction in the bull thesis; recommend taking or growing the position
-- **Overweight**: Constructive view; recommend gradually increasing exposure
-- **Hold**: Balanced view; recommend maintaining the current position
-- **Underweight**: Cautious view; recommend trimming exposure
-- **Sell**: Strong conviction in the bear thesis; recommend exiting or avoiding the position
-
-Commit to a clear stance whenever the debate's strongest arguments warrant one; reserve Hold for situations where the evidence on both sides is genuinely balanced.
-
----
-
-**Debate History:**
-{history}
-{get_investor_policy_full_instruction()}""" + get_language_instruction()
+        messages = [
+            SystemMessage(content=[
+                {"type": "text", "text": static_system, "cache_control": {"type": "ephemeral"}},
+            ]),
+            HumanMessage(content=dynamic_user),
+        ]
 
         investment_plan = invoke_structured_or_freetext(
             structured_llm,
             llm,
-            prompt,
+            messages,
             render_research_plan,
             "Research Manager",
         )

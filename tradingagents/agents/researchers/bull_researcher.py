@@ -1,3 +1,5 @@
+from langchain_core.messages import HumanMessage, SystemMessage
+
 from tradingagents.agents.utils.agent_utils import (
     get_investor_policy_full_instruction,
     get_language_instruction,
@@ -16,27 +18,38 @@ def create_bull_researcher(llm):
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
 
-        prompt = f"""You are a Bull Analyst advocating for investing in the stock. Your task is to build a strong, evidence-based case emphasizing growth potential, competitive advantages, and positive market indicators. Leverage the provided research and data to address concerns and counter bearish arguments effectively.
+        # Static: role + policy — cached across all ticker runs for the same session.
+        static_system = (
+            "You are a Bull Analyst advocating for investing in the stock. Your task is to build a strong, evidence-based case emphasizing growth potential, competitive advantages, and positive market indicators. Leverage the provided research and data to address concerns and counter bearish arguments effectively.\n\n"
+            "Key points to focus on:\n"
+            "- Growth Potential: Highlight the company's market opportunities, revenue projections, and scalability.\n"
+            "- Competitive Advantages: Emphasize factors like unique products, strong branding, or dominant market positioning.\n"
+            "- Positive Indicators: Use financial health, industry trends, and recent positive news as evidence.\n"
+            "- Bear Counterpoints: Critically analyze the bear argument with specific data and sound reasoning, addressing concerns thoroughly and showing why the bull perspective holds stronger merit.\n"
+            "- Engagement: Present your argument in a conversational style, engaging directly with the bear analyst's points and debating effectively rather than just listing data."
+            + get_investor_policy_full_instruction()
+            + get_language_instruction()
+        )
+        # Dynamic: reports + debate history change per call.
+        dynamic_user = (
+            f"Resources available:\n"
+            f"Market research report: {market_research_report}\n"
+            f"Social media sentiment report: {sentiment_report}\n"
+            f"Latest world affairs news: {news_report}\n"
+            f"Company fundamentals report: {fundamentals_report}\n"
+            f"Conversation history of the debate: {history}\n"
+            f"Last bear argument: {current_response}\n"
+            f"Use this information to deliver a compelling bull argument, refute the bear's concerns, and engage in a dynamic debate that demonstrates the strengths of the bull position."
+        )
 
-Key points to focus on:
-- Growth Potential: Highlight the company's market opportunities, revenue projections, and scalability.
-- Competitive Advantages: Emphasize factors like unique products, strong branding, or dominant market positioning.
-- Positive Indicators: Use financial health, industry trends, and recent positive news as evidence.
-- Bear Counterpoints: Critically analyze the bear argument with specific data and sound reasoning, addressing concerns thoroughly and showing why the bull perspective holds stronger merit.
-- Engagement: Present your argument in a conversational style, engaging directly with the bear analyst's points and debating effectively rather than just listing data.
+        messages = [
+            SystemMessage(content=[
+                {"type": "text", "text": static_system, "cache_control": {"type": "ephemeral"}},
+            ]),
+            HumanMessage(content=dynamic_user),
+        ]
 
-Resources available:
-Market research report: {market_research_report}
-Social media sentiment report: {sentiment_report}
-Latest world affairs news: {news_report}
-Company fundamentals report: {fundamentals_report}
-Conversation history of the debate: {history}
-Last bear argument: {current_response}
-Use this information to deliver a compelling bull argument, refute the bear's concerns, and engage in a dynamic debate that demonstrates the strengths of the bull position.
-{get_investor_policy_full_instruction()}
-""" + get_language_instruction()
-
-        response = llm.invoke(prompt)
+        response = llm.invoke(messages)
 
         argument = f"Bull Analyst: {response.content}"
 

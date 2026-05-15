@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import functools
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from tradingagents.agents.schemas import TraderProposal, render_trader_proposal
 from tradingagents.agents.utils.agent_utils import (
@@ -26,29 +26,28 @@ def create_trader(llm):
         instrument_context = build_instrument_context(company_name)
         investment_plan = state["investment_plan"]
 
+        # Static: role + policy — cached across all ticker runs for the same session.
+        static_system = (
+            "You are a trading agent analyzing market data to make investment decisions. "
+            "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
+            "Anchor your reasoning in the analysts' reports and the research plan. "
+            "Position sizing and staging must follow the mandated portfolio policy."
+            + get_investor_policy_full_instruction()
+            + get_language_instruction()
+        )
+        # Dynamic: company name, instrument context, and investment plan change per call.
         messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a trading agent analyzing market data to make investment decisions. "
-                    "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
-                    "Anchor your reasoning in the analysts' reports and the research plan. "
-                    "Position sizing and staging must follow the mandated portfolio policy."
-                    + get_investor_policy_full_instruction()
-                    + get_language_instruction()
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Based on a comprehensive analysis by a team of analysts, here is an investment "
-                    f"plan tailored for {company_name}. {instrument_context} This plan incorporates "
-                    f"insights from current technical market trends, macroeconomic indicators, and "
-                    f"social media sentiment. Use this plan as a foundation for evaluating your next "
-                    f"trading decision.\n\nProposed Investment Plan: {investment_plan}\n\n"
-                    f"Leverage these insights to make an informed and strategic decision."
-                ),
-            },
+            SystemMessage(content=[
+                {"type": "text", "text": static_system, "cache_control": {"type": "ephemeral"}},
+            ]),
+            HumanMessage(content=(
+                f"Based on a comprehensive analysis by a team of analysts, here is an investment "
+                f"plan tailored for {company_name}. {instrument_context} This plan incorporates "
+                f"insights from current technical market trends, macroeconomic indicators, and "
+                f"social media sentiment. Use this plan as a foundation for evaluating your next "
+                f"trading decision.\n\nProposed Investment Plan: {investment_plan}\n\n"
+                f"Leverage these insights to make an informed and strategic decision."
+            )),
         ]
 
         trader_plan = invoke_structured_or_freetext(
