@@ -312,7 +312,6 @@ def _run_job(j: Dict[str, Any], cfg: Dict[str, Any], live: set, trade_date: str)
 
     if tid not in live:
         _save_job_outcome(cfg, jid, "cancelled")
-        messaging.send_advisor_message(cfg, tid, "Removed — no longer in portfolio.")
         return {"ticker": tid, "status": "cancelled", "verdict": ""}
 
     analysts = cfg.get("portfolio_advisor_deep_analysts") or ["news", "fundamentals", "market"]
@@ -334,7 +333,6 @@ def _run_job(j: Dict[str, Any], cfg: Dict[str, Any], live: set, trade_date: str)
                 pass
             _save_job_outcome(cfg, jid, "completed")
             verdict = messaging.ntfy_verdict(dec, tid)
-            messaging.send_advisor_message(cfg, tid, verdict)
             return {"ticker": tid, "status": "completed", "verdict": verdict}
         else:
             analysis_text = run_single_model_analysis(cfg, tid, job_type)
@@ -345,12 +343,10 @@ def _run_job(j: Dict[str, Any], cfg: Dict[str, Any], live: set, trade_date: str)
                 pass
             _save_job_outcome(cfg, jid, "completed")
             verdict = messaging.ntfy_verdict(analysis_text or "", tid)
-            messaging.send_advisor_message(cfg, tid, verdict)
             return {"ticker": tid, "status": "completed", "verdict": verdict}
     except Exception as e:
         logger.exception("job failed for %s: %s", tid, e)
         _save_job_outcome(cfg, jid, "failed", str(e))
-        messaging.send_advisor_message(cfg, f"{tid} failed", str(e)[:150])
         return {"ticker": tid, "status": "failed", "verdict": ""}
 
 
