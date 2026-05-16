@@ -27,7 +27,13 @@ PRICING: dict[str, tuple[float, float]] = {
     "deepseek/deepseek-chat": (0.27, 1.10),
     "anthropic/claude-sonnet-4.5": (3.00, 15.00),
     "anthropic/claude-sonnet-4.6": (3.00, 15.00),
+    # Versioned slugs returned by OpenRouter (date suffix e.g. -20260423)
+    "anthropic/claude-4.5-sonnet-20250929": (3.00, 15.00),
+    "anthropic/claude-4.6-sonnet-20260217": (3.00, 15.00),
+    "deepseek/deepseek-v4-flash-20260423": (0.10, 0.40),
+    "deepseek/deepseek-v4-pro-20260423": (0.27, 1.10),
     "openai/gpt-5.5": (5.00, 15.00),
+    "openai/gpt-5.5-20260423": (5.00, 15.00),
     "openai/gpt-4o": (2.50, 10.00),
     "openai/gpt-4o-mini": (0.15, 0.60),
     "openai/o1-mini": (3.00, 12.00),
@@ -44,6 +50,11 @@ def _default_log_path() -> Path:
 
 def estimate_cost_usd(model: str, prompt_tokens: int, completion_tokens: int) -> Optional[float]:
     rate = PRICING.get(model)
+    if rate is None:
+        # OpenRouter appends a date suffix (-YYYYMMDD); try stripping it.
+        import re as _re
+        base = _re.sub(r"-\d{8}$", "", model)
+        rate = PRICING.get(base)
     if rate is None:
         return None
     in_per_m, out_per_m = rate
