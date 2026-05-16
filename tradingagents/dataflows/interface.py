@@ -1,3 +1,7 @@
+import os
+import threading
+import time
+from collections import OrderedDict
 from typing import Annotated
 
 # Import from vendor-specific modules
@@ -143,8 +147,76 @@ def get_vendor(category: str, method: str = None) -> str:
     # Fall back to category-level configuration
     return config.get("data_vendors", {}).get(category, "default")
 
+# In-process TTL cache so the news, market, and fundamentals analysts (and any
+# downstream agents in the same graph cycle) don't each independently re-fetch
+# the same OHLCV/news/fundamentals payload. Disable with
+# ``TRADINGAGENTS_VENDOR_CACHE_DISABLE=1``. Tune TTL via
+# ``TRADINGAGENTS_VENDOR_CACHE_TTL_SECONDS`` (default 600s).
+_VENDOR_CACHE_LOCK = threading.Lock()
+_VENDOR_CACHE: "OrderedDict[tuple, tuple[float, object]]" = OrderedDict()
+_VENDOR_CACHE_MAX_ENTRIES = 256
+
+
+def _vendor_cache_enabled() -> bool:
+    return os.environ.get("TRADINGAGENTS_VENDOR_CACHE_DISABLE") != "1"
+
+
+def _vendor_cache_ttl() -> int:
+    try:
+        return int(os.environ.get("TRADINGAGENTS_VENDOR_CACHE_TTL_SECONDS", "600"))
+    except ValueError:
+        return 600
+
+
+def _vendor_cache_key(method: str, args: tuple, kwargs: dict):
+    try:
+        return (method, args, tuple(sorted(kwargs.items())))
+    except TypeError:
+        return None
+
+
+def _vendor_cache_get(key) -> tuple[bool, object]:
+    if key is None:
+        return False, None
+    ttl = _vendor_cache_ttl()
+    now = time.monotonic()
+    with _VENDOR_CACHE_LOCK:
+        hit = _VENDOR_CACHE.get(key)
+        if hit is None:
+            return False, None
+        ts, value = hit
+        if now - ts >= ttl:
+            _VENDOR_CACHE.pop(key, None)
+            return False, None
+        _VENDOR_CACHE.move_to_end(key)
+        return True, value
+
+
+def _vendor_cache_put(key, value) -> None:
+    if key is None:
+        return
+    with _VENDOR_CACHE_LOCK:
+        _VENDOR_CACHE[key] = (time.monotonic(), value)
+        _VENDOR_CACHE.move_to_end(key)
+        while len(_VENDOR_CACHE) > _VENDOR_CACHE_MAX_ENTRIES:
+            _VENDOR_CACHE.popitem(last=False)
+
+
+def clear_vendor_cache() -> None:
+    """Flush the per-cycle data cache (test hook / manual reset)."""
+    with _VENDOR_CACHE_LOCK:
+        _VENDOR_CACHE.clear()
+
+
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
+    cache_enabled = _vendor_cache_enabled()
+    cache_key = _vendor_cache_key(method, args, kwargs) if cache_enabled else None
+    if cache_enabled:
+        hit, cached = _vendor_cache_get(cache_key)
+        if hit:
+            return cached
+
     category = get_category_for_method(method)
     vendor_config = get_vendor(category, method)
     primary_vendors = [v.strip() for v in vendor_config.split(',')]
@@ -167,7 +239,10 @@ def route_to_vendor(method: str, *args, **kwargs):
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
 
         try:
-            return impl_func(*args, **kwargs)
+            result = impl_func(*args, **kwargs)
+            if cache_enabled:
+                _vendor_cache_put(cache_key, result)
+            return result
         except AlphaVantageRateLimitError:
             continue  # Only rate limits trigger fallback
 

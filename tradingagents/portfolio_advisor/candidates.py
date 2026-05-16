@@ -558,5 +558,5 @@ def run_promoted_candidate_pm_comparison(
         return 0
     from tradingagents.portfolio_advisor.advisor_pm import run_pm_cycle
 
-    run_pm_cycle(cfg, trigger="candidate_comparison", extra_context=context, hold_for_approval=False)
+    run_pm_cycle(cfg, trigger="candidate_comparison", extra_context=context)
     return len(promoted)

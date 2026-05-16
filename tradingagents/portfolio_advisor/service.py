@@ -180,6 +180,22 @@ def run_planning_session(cfg: Dict[str, Any], *, mode: str) -> Tuple[AdvisorPlan
         mode=mode,
         tickers=tickers,
     )
+    if not plan.jobs:
+        # Could be a structured-output parse failure (free-text fallback returned
+        # jobs=[]) or a legitimately empty plan. Either way the queue is now empty
+        # and nothing will run — surface it instead of failing silently.
+        try:
+            messaging.send_advisor_message(
+                cfg,
+                f"Advisor: {mode} produced no jobs",
+                (
+                    f"Planner returned 0 jobs for {len(tickers)} tickers. "
+                    "Pending queue will be empty. Check planner LLM and rerun."
+                ),
+                urgent=True,
+            )
+        except Exception:
+            logger.exception("failed to send empty-plan alert")
     thesis_raw = cfg.get("portfolio_advisor_thesis_metrics") or {}
     thesis_metrics = thesis_raw if isinstance(thesis_raw, dict) else {}
     plan, overrides = plan_validation.validate_advisor_plan(
@@ -378,7 +394,7 @@ def _post_batch_pm_brief(cfg: Dict[str, Any], results: List[Dict[str, Any]]) -> 
         from tradingagents.portfolio_advisor.advisor_pm import run_pm_cycle
         verdicts = "\n".join(f"{r['ticker']}: {r['verdict']}" for r in results if r.get("verdict"))
         context = f"Research batch just completed. Individual results:\n{verdicts}\n\nBrief each ticker: one line, verdict first."
-        result = run_pm_cycle(cfg, trigger="batch_complete", extra_context=context, hold_for_approval=False)
+        result = run_pm_cycle(cfg, trigger="batch_complete", extra_context=context)
         if result.push_note or any(s.stance in ("sell", "trim") for s in (result.stances or [])):
             return
         if result.stances:
@@ -402,12 +418,42 @@ def run_due_jobs(cfg: Dict[str, Any]) -> int:
         outcome_sync.auto_close_outcomes(cfg, live, rows=rows)
     except Exception as e:
         logger.error("run_due: cannot fetch portfolio: %s", e)
+        # Push a one-shot alert so a silent fetch failure does not look like a
+        # quiet system. Throttle with state so we do not spam every 15 minutes.
+        try:
+            with _state_lock:
+                st_err = state.load_state(cfg)
+                last_iso = st_err.get("last_etoro_fetch_alert_iso") or ""
+                last_dt = _parse_iso(last_iso) if last_iso else None
+                throttle_h = int(cfg.get("portfolio_advisor_silent_alert_throttle_hours") or 6)
+                should_alert = (
+                    last_dt is None
+                    or (_utc_now() - last_dt).total_seconds() >= throttle_h * 3600
+                )
+                if should_alert:
+                    st_err["last_etoro_fetch_alert_iso"] = _utc_now().isoformat()
+                    state.save_state(cfg, st_err)
+            if should_alert:
+                messaging.send_advisor_message(
+                    cfg,
+                    "Advisor: portfolio fetch failed",
+                    f"run_due could not fetch eToro portfolio: {e}. No jobs will run until this clears.",
+                    urgent=True,
+                )
+        except Exception:
+            logger.exception("failed to send eToro fetch alert")
         return 0
 
     # Hold the lock across select + claim so concurrent cron ticks cannot pick the same job.
     with _state_lock:
         st = state.load_state(cfg)
         now = _utc_now()
+        # Reset stalled in_progress jobs (crashed run_due, OOM, etc.) before claiming new ones.
+        ttl_minutes = int(cfg.get("portfolio_advisor_in_progress_ttl_minutes") or 30)
+        reset_ids = state.reset_stalled_in_progress_jobs(st, ttl_seconds=ttl_minutes * 60)
+        if reset_ids:
+            logger.warning("run_due: reset %d stalled in_progress job(s): %s", len(reset_ids), reset_ids)
+            state.save_state(cfg, st)
         due: List[Dict[str, Any]] = []
         for j in state.list_pending_jobs(st):
             try:

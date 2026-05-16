@@ -46,51 +46,50 @@ _FULL_GRAPH_COMPATIBLE_STANCES = {
 _PM_CLAUDE_DEFAULT = """\
 # Portfolio Manager Standing Instructions
 
-You are the Portfolio Manager (PM) for a personal investment portfolio.
+You are the Portfolio Manager (PM) for a personal investment portfolio. The human reads
+your messages on a phone. You text like a friend — not a robot, not a report.
 
 ## Role
 - Advisory only: you recommend, the human decides and executes.
 - You hold the institutional memory: what we own, why, what the thesis is, what we learned.
-- You are the human's intelligent partner — answer questions, flag risks, explain stances.
+
+## Voice — this matters
+- Write like a person texting an update. Conversational sentences. No section headers,
+  no "VERDICT" labels, no "REQUIRED ACTIONS" labels, no bullet lists in the executive
+  summary. Just say what's going on in plain language.
+- Vary how you open. Don't start every message with the same word. Don't repeat the
+  same sentence shape twice in a row.
+- Short. The human glances at this. 2-4 sentences for routine updates. Up to ~8 for
+  meaningful changes. Drop anything that isn't load-bearing.
+- Do not list every position. Only mention a ticker if there's something to say about it.
+- If you already told the human about a stance recently and nothing material has changed,
+  just say "no change since last update" or skip the message entirely (set push_note to "").
 
 ## Hard rules — never break these
-- Never invent deadlines, cut rules, stop-loss triggers, position sizing rules, or trading constraints
-  that the human has not explicitly stated. If you don't see it in the data you were given, it does not exist.
-- Never invent research findings, decision history, catalysts, earnings dates, or calendar dates. Treat absent
-  evidence as absent evidence.
+- Never invent deadlines, cut rules, stop-loss triggers, position sizing rules, or trading
+  constraints that the human has not explicitly stated. Absent evidence is absent evidence.
+- Never invent research findings, decision history, catalysts, earnings dates, or calendar dates.
 - Never say a ticker "must" be cut by a date or "should" be trimmed by X% unless the human told you so.
-- If you are uncertain whether a rule exists, say "I don't have a rule for that — do you want to set one?"
-- Pending jobs in the queue are SCHEDULED research jobs. They do not mean the ticker lacks analysis or is
-  in crisis. Do not frame a May 26 scheduled job as "urgently awaiting thesis results."
-- Only flag urgency when: (a) a job is overdue by >24h, (b) a catalyst is within 48h, or (c) the human
-  explicitly asked for something and it hasn't run yet.
+- Pending jobs in the queue are SCHEDULED research jobs. They do not mean the ticker lacks
+  analysis. Do not frame a future scheduled job as "urgently awaiting thesis results."
+- Only flag urgency (push_note) when: (a) a stance materially changed since your last cycle,
+  (b) a catalyst is within 48h, or (c) the human explicitly asked for something and it hasn't run.
+- If you recommend closing or trimming, name the exact ticker, share count, and dollar value
+  from the portfolio snapshot. Don't say "reduce exposure" without naming the position.
 
 ## Evidence discipline
-- Base answers on the portfolio snapshot, pending jobs, completed research results, PM memory, and explicit
-  caller notes supplied in the prompt.
-- If the answer depends on missing or stale information, say what is missing and queue follow-up research with
-  append_jobs instead of filling the gap yourself.
-- Use full_graph when the question needs a new multi-agent research layer; use single_model for a quick
-  thesis check, weekly summary, post-earnings read, or routine monitor.
+- Base answers on the portfolio snapshot, pending jobs, completed research, PM memory, and
+  explicit caller notes. If something depends on missing/stale info, say what's missing and
+  queue follow-up research with append_jobs instead of guessing.
+- Use full_graph for new multi-agent research; single_model for a quick thesis check,
+  weekly recap, post-earnings read, or routine monitor.
 
-## When answering /ask questions via ntfy
-- Answer directly. Verdict first, reasoning after.
-- Stick to facts present in the portfolio snapshot, pending jobs, and memory. Do not extrapolate rules.
-- If you recommend closing or trimming, name the exact ticker, lot count, share/unit count, dollar value, and
-  open prices from the portfolio snapshot. Do not say "close something" or "reduce exposure" without saying
-  exactly which open positions the human should close.
-- Keep replies under 600 characters; the human reads them on a phone.
-
-## When the human asks to run jobs sooner or immediately
-- Use append_jobs to queue the relevant tickers right away. Do not just describe the situation.
-- Pick the most appropriate job_type for each ticker (thesis_check, weekly_summary, post_earnings, or routine_monitoring).
-- Use execution_tier "single_model" unless the human asks for a deep run.
-- Execute immediately — no approval needed. Tell the human what you queued. They can reply CANCEL to undo.
-- Example: human says "run NVDA sooner" -> append_jobs NVDA thesis_check single_model, notify "Queued NVDA thesis_check. Reply CANCEL to undo."
+## When the human asks to run jobs sooner
+- Use append_jobs to queue the tickers immediately. Tell the human what you queued in one line.
+  They reply CANCEL to undo.
 
 ## Memory discipline
-- Write memory_note as if briefing your next self: what mattered, what changed, what to watch.
-- One tight paragraph. No filler. No AI patterns.
+- memory_note: one tight paragraph briefing your next self. What mattered, what changed, what to watch.
 """
 
 _PM_MEMORY_SEPARATOR = "\n---\n"
@@ -903,59 +902,6 @@ def _coerce_pm_result_from_text(text: str) -> AdvisorPMCycleResult:
 
 
 # ---------------------------------------------------------------------------
-# Pending approval — PM proposes actions, human confirms via ntfy YES/NO
-# ---------------------------------------------------------------------------
-
-def _pending_approval_path(cfg: Dict[str, Any]) -> Path:
-    return state.advisor_dir(cfg) / "pending_approval.json"
-
-
-def save_pending_approval(cfg: Dict[str, Any], result: AdvisorPMCycleResult) -> None:
-    """Save proposed PM actions to disk, waiting for human YES/NO."""
-    path = _pending_approval_path(cfg)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "request_replan": result.request_replan,
-        "replan_rationale": result.replan_rationale or "",
-        "append_jobs": [j.model_dump() for j in (result.append_jobs or [])],
-    }
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
-def load_pending_approval(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    path = _pending_approval_path(cfg)
-    if not path.is_file():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def discard_pending_approval(cfg: Dict[str, Any]) -> None:
-    path = _pending_approval_path(cfg)
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def format_approval_prompt(result: AdvisorPMCycleResult) -> str:
-    """Build a short phone-readable summary of what the PM wants to do."""
-    lines: List[str] = []
-    if result.request_replan:
-        reason = (result.replan_rationale or "priorities shifted").strip()[:120]
-        lines.append(f"Replan full job queue: {reason}")
-    for j in (result.append_jobs or [])[:5]:
-        tier = "deep" if j.execution_tier == "full_graph" else "quick"
-        lines.append(f"Queue {j.ticker} {j.job_type} ({tier}): {(j.rationale or '').strip()[:80]}")
-    if not lines:
-        return ""
-    return "Proposed actions:\n" + "\n".join(f"  {l}" for l in lines) + "\n\nReply YES to approve or NO to skip."
-
-
-# ---------------------------------------------------------------------------
 # Last-action log — lets the user CANCEL the most recent PM-queued jobs
 # ---------------------------------------------------------------------------
 
@@ -1013,73 +959,6 @@ def cancel_last_action(cfg: Dict[str, Any]) -> str:
         note = " (replan cannot be undone)" if data.get("had_replan") else ""
         return f"Cancelled: {', '.join(cancelled)}{note}"
     return "Jobs already ran or were not found in queue."
-
-
-def execute_pending_approval(cfg: Dict[str, Any]) -> str:
-    """Execute whatever is in pending_approval.json. Returns a status string."""
-    pending = load_pending_approval(cfg)
-    if not pending:
-        return "No pending actions found."
-    discard_pending_approval(cfg)
-
-    parts: List[str] = []
-
-    if pending.get("request_replan"):
-        try:
-            from tradingagents.portfolio_advisor.service import run_replan
-            run_replan(cfg, ignore_weekday=True)
-            parts.append("Replan queued.")
-        except Exception as e:
-            parts.append(f"Replan failed: {e}")
-
-    jobs = pending.get("append_jobs") or []
-    if jobs:
-        try:
-            _payload, _pt, tickers, _rows = etoro_scan.fetch_portfolio_rows()
-            live = etoro_scan.current_ticker_set(tickers)
-            st = state.load_state(cfg)
-            now = datetime.now(timezone.utc)
-            new_rows: List[Dict[str, Any]] = []
-            skipped: List[str] = []
-            for i, job in enumerate(jobs[:5]):
-                tid = str(job.get("ticker") or "").strip().upper()
-                if not tid or tid not in live:
-                    skipped.append(tid or "?")
-                    continue
-                when = now + timedelta(minutes=1)
-                new_rows.append({
-                    "id": uuid.uuid4().hex[:20],
-                    "ticker": tid,
-                    "scheduled_at": when.isoformat(),
-                    "kind": "deep_research",
-                    "reason": str(job.get("rationale") or "Human-approved PM job")[:500],
-                    "status": "pending",
-                    "created_at": now.isoformat(),
-                    "execution_tier": str(job.get("execution_tier") or "single_model"),
-                    "job_type": str(job.get("job_type") or "thesis_check"),
-                    "source": str(job.get("source") or "pm_human_request"),
-                    "evidence_question": str(job.get("evidence_question") or job.get("rationale") or "")[:300],
-                    "supersedes_job_id": str(job.get("supersedes_job_id") or ""),
-                    "flags": ["PM_APPROVED"],
-                })
-            if new_rows:
-                state.append_jobs(st, new_rows)
-                state.save_state(cfg, st)
-                tickers_queued = [r["ticker"] for r in new_rows]
-                save_last_action(
-                    cfg,
-                    job_ids=[r["id"] for r in new_rows],
-                    had_replan=bool(pending.get("request_replan")),
-                    description="Queued: " + ", ".join(tickers_queued),
-                )
-                _trigger_run_due_async()
-                parts.append(f"Queued: {', '.join(tickers_queued)}")
-            if skipped:
-                parts.append(f"Skipped (not in book): {', '.join(skipped)}")
-        except Exception as e:
-            parts.append(f"Job append failed: {e}")
-
-    return " | ".join(parts) if parts else "Done (no actions to execute)."
 
 
 def apply_pm_cycle_followups(cfg: Dict[str, Any], result: AdvisorPMCycleResult) -> Dict[str, Any]:
@@ -1213,7 +1092,11 @@ def _trigger_run_due_async() -> None:
 
 
 def _notify_action_stances(cfg: Dict[str, Any], result: AdvisorPMCycleResult, portfolio_rows: List[Dict[str, Any]]) -> bool:
-    """Update action log from PM stances; push one consolidated alert when needed."""
+    """Update action log from PM stances; push one conversational alert when something is new.
+
+    Prefers the PM's own push_note (written conversationally per PM_CLAUDE.md). Falls back
+    to a one-line-per-ticker compact form. No "Action required:" header, no "Reason:" sublines.
+    """
     try:
         from tradingagents.portfolio_advisor import messaging
         from tradingagents.portfolio_advisor.action_log import upsert_action, mark_done
@@ -1224,24 +1107,30 @@ def _notify_action_stances(cfg: Dict[str, Any], result: AdvisorPMCycleResult, po
                 mark_done(cfg, s.ticker)
         if not action_stances:
             return False
-        lines = []
+
+        new_or_changed: List[Any] = []
         for s in action_stances:
             rationale = (s.rationale or "").strip()
             action_status = upsert_action(cfg, s.ticker, s.stance, rationale, source="pm_cycle")
             if action_status == "unchanged":
                 continue
-            instruction = _format_close_instruction(s.ticker, s.stance, rationale, portfolio_rows)
-            lines.append(
-                f"{s.ticker} {s.stance.upper()}: {instruction}\nReason: {rationale[:180]}"
-            )
-        if not lines:
+            new_or_changed.append(s)
+        if not new_or_changed:
             return False
-        note = (result.push_note or "").strip()
-        body_parts = ["Action required:", *lines]
-        if note:
-            body_parts.extend(["", f"PM note: {note[:280]}"])
-        body = "\n".join(body_parts)
-        messaging.send_advisor_message(cfg, "Action required", body)
+
+        push = (result.push_note or "").strip()
+        if push:
+            body = push
+        else:
+            # No PM push_note — synthesize a compact one-liner per changed ticker.
+            parts: List[str] = []
+            for s in new_or_changed:
+                instr = _format_close_instruction(s.ticker, s.stance, s.rationale or "", portfolio_rows)
+                parts.append(f"{s.ticker}: {instr}")
+            body = " ".join(parts)
+        # Quiet-hours rule: only bypass the window when the PM itself flagged push_note.
+        # No push_note → routine; will hold until the next morning/evening window.
+        messaging.send_advisor_message(cfg, "PM", body, urgent=bool(push))
         return True
     except Exception as e:
         logger.debug("_notify_action_stances failed silently: %s", e)
@@ -1253,7 +1142,6 @@ def run_pm_cycle(
     *,
     trigger: str = "manual",
     extra_context: Optional[str] = None,
-    hold_for_approval: bool = False,
 ) -> AdvisorPMCycleResult:
     """Run one PM council pass: portfolio snapshot + state → structured plan → logs."""
     set_config(cfg)
@@ -1419,12 +1307,7 @@ the trigger, say that plainly and use append_jobs to send a new research layer t
         pending_jobs=pend,
         trigger=trigger_s,
     )
-    has_proposed_actions = bool(result.request_replan or result.append_jobs)
-    if hold_for_approval and has_proposed_actions:
-        save_pending_approval(cfg, result)
-        actions_taken = {"apply_enabled": False, "held_for_approval": True}
-    else:
-        actions_taken = apply_pm_cycle_followups(cfg, result)
+    actions_taken = apply_pm_cycle_followups(cfg, result)
 
     # Proactive alert for action stances on automated cycles (ntfy questions already surface stances in the reply)
     action_alert_sent = False
@@ -1432,11 +1315,12 @@ the trigger, say that plainly and use append_jobs to send a new research layer t
         action_alert_sent = _notify_action_stances(cfg, result, portfolio_rows)
 
     # Push note — only when it is not already included in the consolidated action alert.
+    # push_note is the PM's own urgency signal and bypasses quiet hours.
     note = (result.push_note or "").strip()
     if note and not action_alert_sent and trigger_s != "ntfy_question":
         try:
             from tradingagents.portfolio_advisor import messaging
-            messaging.send_advisor_message(cfg, "PM", note[:280])
+            messaging.send_advisor_message(cfg, "PM", note, urgent=True)
         except Exception as e:
             logger.debug("push_note send failed: %s", e)
 

@@ -334,7 +334,7 @@ def _cmd_ask(question: str, topic: str) -> str:
         f"        _parts = [f\"[{{e['ts']}}] {{'You' if e['role']=='user' else 'PM'}}: {{e['text']}}\" for e in _entries[-10:]]\n"
         f"        if _parts: _chat_ctx = 'Recent conversation:\\n' + '\\n'.join(_parts)\n"
         f"    _full_ctx = (_chat_ctx + '\\n\\nCurrent question: ' + {q_repr}).strip() if _chat_ctx else {q_repr}\n"
-        f"    result = run_pm_cycle(cfg, trigger='ntfy_question', extra_context=_full_ctx, hold_for_approval=False)\n"
+        f"    result = run_pm_cycle(cfg, trigger='ntfy_question', extra_context=_full_ctx)\n"
         f"    summary = (result.executive_summary or '').strip()\n"
         f"    if len(summary) > 500:\n"
         f"        summary = summary[:497] + '...'\n"
@@ -373,76 +373,19 @@ def _cmd_ask(question: str, topic: str) -> str:
 
 
 def _cmd_yes(topic: str) -> str:
-    """Execute PM's pending proposed actions."""
-    python = sys.executable
-    root_repr = repr(str(_PROJECT_ROOT))
-    topic_repr = repr(topic)
-    inline = (
-        f"import sys, os\n"
-        f"from pathlib import Path\n"
-        f"try:\n"
-        f"    from dotenv import load_dotenv\n"
-        f"    load_dotenv(Path({root_repr}) / '.env', override=False)\n"
-        f"except Exception:\n"
-        f"    pass\n"
-        f"sys.path.insert(0, {root_repr})\n"
-        f"import requests\n"
-        f"topic = os.environ.get('NTFY_TOPIC', {topic_repr})\n"
-        f"base = os.environ.get('NTFY_BASE_URL', 'https://ntfy.sh')\n"
-        f"def post(msg, title='PM'):\n"
-        f"    requests.post(f'{{base}}/{{topic}}', data=msg.encode('utf-8'),\n"
-        f"        headers={{'Title': title, 'Content-Type': 'text/plain; charset=utf-8'}}, timeout=30)\n"
-        f"try:\n"
-        f"    from ui.user_config import merged_app_config\n"
-        f"    from tradingagents.portfolio_advisor.advisor_pm import execute_pending_approval, load_pending_approval\n"
-        f"    cfg = merged_app_config()\n"
-        f"    if not load_pending_approval(cfg):\n"
-        f"        post('No pending actions to approve.', title='PM')\n"
-        f"    else:\n"
-        f"        result = execute_pending_approval(cfg)\n"
-        f"        post(f'Done. {{result}}', title='PM')\n"
-        f"except Exception as exc:\n"
-        f"    post(f'Error: {{exc}}', title='PM')\n"
+    """No-op stub: PM cycles auto-apply; YES is not used. Returns an informational reply."""
+    return (
+        "YES is not used — the PM applies its own actions automatically. "
+        "Reply CANCEL to undo the last PM action."
     )
-    try:
-        subprocess.Popen(
-            [python, "-c", inline],
-            cwd=str(_PROJECT_ROOT),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return "Executing approved actions..."
-    except Exception as exc:
-        return f"Failed to execute approval: {exc}"
 
 
 def _cmd_no() -> str:
-    """Discard PM's pending proposed actions."""
-    python = sys.executable
-    root_repr = repr(str(_PROJECT_ROOT))
-    inline = (
-        f"import sys\n"
-        f"from pathlib import Path\n"
-        f"try:\n"
-        f"    from dotenv import load_dotenv\n"
-        f"    load_dotenv(Path({root_repr}) / '.env', override=False)\n"
-        f"except Exception:\n"
-        f"    pass\n"
-        f"sys.path.insert(0, {root_repr})\n"
-        f"from ui.user_config import merged_app_config\n"
-        f"from tradingagents.portfolio_advisor.advisor_pm import discard_pending_approval\n"
-        f"discard_pending_approval(merged_app_config())\n"
+    """No-op stub: PM cycles auto-apply; NO is not used."""
+    return (
+        "NO is not used — the PM applies its own actions automatically. "
+        "Reply CANCEL to undo the last PM action."
     )
-    try:
-        subprocess.Popen(
-            [python, "-c", inline],
-            cwd=str(_PROJECT_ROOT),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
-    return "Actions discarded."
 
 
 def _cmd_cancel(topic: str) -> str:

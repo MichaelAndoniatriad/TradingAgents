@@ -1,6 +1,7 @@
 from typing import Optional
 
 from .base_client import BaseLLMClient
+from .cost_logger import get_default_cost_callback
 
 # Providers that use the OpenAI-compatible chat completions API
 _OPENAI_COMPATIBLE = (
@@ -10,6 +11,24 @@ _OPENAI_COMPATIBLE = (
     "minimax", "minimax-cn",
     "ollama", "openrouter",
 )
+
+
+def _inject_cost_callback(kwargs: dict) -> dict:
+    """Ensure the singleton cost-logging callback is attached to every LLM.
+
+    Preserves any caller-supplied callbacks. Disable with
+    ``TRADINGAGENTS_DISABLE_COST_LOG=1``.
+    """
+    import os
+    if os.environ.get("TRADINGAGENTS_DISABLE_COST_LOG") == "1":
+        return kwargs
+    cb = get_default_cost_callback()
+    existing = kwargs.get("callbacks")
+    if existing is None:
+        kwargs["callbacks"] = [cb]
+    elif isinstance(existing, list) and cb not in existing:
+        kwargs["callbacks"] = [*existing, cb]
+    return kwargs
 
 
 def create_llm_client(
@@ -37,6 +56,7 @@ def create_llm_client(
         ValueError: If provider is not supported
     """
     provider_lower = provider.lower()
+    kwargs = _inject_cost_callback(dict(kwargs))
 
     if provider_lower in _OPENAI_COMPATIBLE:
         from .openai_client import OpenAIClient

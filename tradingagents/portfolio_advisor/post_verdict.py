@@ -106,7 +106,8 @@ If any data above is missing, say so. Do not invent figures.
         content = "\n".join(parts) if parts else str(content)
     text = str(content).strip()
     subj = f"[TradingAgents] Post-earnings verdict — {sym} — {today}"
-    messaging.send_advisor_message(cfg, subj, text)
+    # Post-earnings verdict is user-triggered; deliver regardless of window.
+    messaging.send_advisor_message(cfg, subj, text, urgent=True)
     try:
         from tradingagents.agents.utils.event_log import append_event
 

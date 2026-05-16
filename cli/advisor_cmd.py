@@ -195,7 +195,8 @@ def portfolio_advisor_alert(
     """Send an ad-hoc advisor message via the same webhook + SMTP as other portfolio notices."""
     _configure_logging(verbose)
     cfg = DEFAULT_CONFIG.copy()
-    ok = portfolio_messaging.send_advisor_message(cfg, subject, body)
+    # Manual `portfolio alert` is user-initiated; always deliver regardless of window.
+    ok = portfolio_messaging.send_advisor_message(cfg, subject, body, urgent=True)
     if ok:
         console.print("[green]Message sent (at least one channel).[/green]")
     else:

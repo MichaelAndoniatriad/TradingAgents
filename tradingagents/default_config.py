@@ -134,7 +134,9 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Master switch for advisor PM (set False only to pause all PM automation, e.g. tests or cost cap).
     "portfolio_advisor_pm_enabled": True,
     # After each autonomous full-graph deep run (bootstrap, run-due full_graph, clerk queues), run advisor PM.
-    "portfolio_advisor_pm_after_each_langgraph": True,
+    # Default False to save a GPT-5.5 pass per full_graph job; a post-batch PM brief still runs
+    # in run_due_jobs. Set to True only if you want a per-ticker PM after every deep run.
+    "portfolio_advisor_pm_after_each_langgraph": False,
     # When True, run one advisor PM cycle immediately after portfolio bootstrap completes.
     "portfolio_advisor_pm_cycle_after_bootstrap": True,
     # When True, PM structured flags may trigger replan and/or append extra pending jobs.

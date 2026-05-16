@@ -230,5 +230,6 @@ def run_full_portfolio_bootstrap(
         cfg,
         f"[TradingAgents] Portfolio bootstrap complete ({len(todo)} names)",
         "\n".join(summary_lines)[:15000],
+        urgent=True,
     )
     return {"trade_date": td, "results": results, "tickers": todo}

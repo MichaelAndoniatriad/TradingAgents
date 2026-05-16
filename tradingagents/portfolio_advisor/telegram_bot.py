@@ -89,37 +89,26 @@ def _is_trivial(text: str) -> bool:
 
 
 def _format_pm_reply(result: AdvisorPMCycleResult) -> str:
-    lines: List[str] = []
+    """Return the PM's conversational reply. The PM writes prose; we don't decorate it.
+
+    The only structured tails we keep are: (1) a one-line note when jobs were queued
+    so the human knows they can CANCEL, and (2) the push_note if it adds something
+    beyond the summary. No section headers, no bullet stance dumps — those live in
+    the dashboard, not on a phone.
+    """
     summary = (result.executive_summary or "").strip()
-    if summary:
-        lines.append(summary[:900])
-    action_stances = [s for s in (result.stances or []) if s.stance in ("sell", "trim", "buy", "add")]
-    if action_stances:
-        lines.append("")
-        lines.append("Actions:")
-        for s in action_stances[:6]:
-            reason = (s.rationale or "").strip()
-            lines.append(f"- {s.ticker} {s.stance.upper()}: {reason[:500]}")
-    holds = [s for s in (result.stances or []) if s.stance in ("hold", "watch")]
-    if holds:
-        lines.append("")
-        lines.append("No immediate action:")
-        lines.append(", ".join(f"{s.ticker} {s.stance}" for s in holds[:12]))
-    if result.forward_tasks:
-        lines.append("")
-        lines.append("Next checks:")
-        for task in result.forward_tasks[:4]:
-            lines.append(f"- {str(task).strip()[:220]}")
+    lines: List[str] = [summary] if summary else []
+
     if result.append_jobs:
-        lines.append("")
-        lines.append("Research queued:")
-        for job in result.append_jobs[:5]:
-            lines.append(f"- {job.ticker} {job.job_type} ({job.execution_tier})")
-    if result.request_replan:
-        lines.append("")
-        lines.append(f"Replan requested: {(result.replan_rationale or 'no rationale supplied')[:300]}")
+        queued = ", ".join(f"{j.ticker}" for j in result.append_jobs[:5])
+        lines.append(f"\nQueued: {queued}. Reply CANCEL to undo.")
+
+    push = (result.push_note or "").strip()
+    if push and push not in summary:
+        lines.append(f"\n{push}")
+
     out = "\n".join(lines).strip()
-    return out or "I could not produce a clear PM answer from the current context."
+    return out or "I don't have a clear read on that right now."
 
 
 def answer_text(cfg: Dict[str, Any], text: str) -> str:
@@ -132,7 +121,6 @@ def answer_text(cfg: Dict[str, Any], text: str) -> str:
         cfg,
         trigger="ntfy_question",
         extra_context=f"Telegram human question:\n{s}\n\nAnswer as a direct chat reply. Be concise, clear, and advisory only.",
-        hold_for_approval=False,
     )
     return _format_pm_reply(result)
 

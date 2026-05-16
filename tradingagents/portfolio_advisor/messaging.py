@@ -11,16 +11,77 @@ import json
 import logging
 import re
 from difflib import SequenceMatcher
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
 
+try:  # Python 3.9+ stdlib; absent only in stripped-down environments.
+    from zoneinfo import ZoneInfo  # type: ignore[import]
+except ImportError:  # pragma: no cover - exotic envs
+    ZoneInfo = None  # type: ignore[assignment]
+
 from tradingagents.advisor.email_notify import analysis_smtp_ready, send_plain_email
 from tradingagents.advisor.notify import send_webhook
 
 logger = logging.getLogger(__name__)
+
+
+# Default quiet-hours config. Routine PM messages only push during these windows;
+# anything outside is logged to the dashboard and held. Calls with urgent=True
+# (chat replies, watchdog price triggers, system failures, PM push_note) bypass.
+_DEFAULT_SEND_WINDOWS_UK = [(time(10, 0), time(11, 0)), (time(22, 0), time(23, 0))]
+_DEFAULT_QUIET_TZ = "Europe/London"
+
+
+def _parse_hhmm(s: str) -> Optional[time]:
+    try:
+        hh, mm = s.strip().split(":", 1)
+        return time(int(hh), int(mm))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _send_windows(cfg: Dict[str, Any]) -> List[tuple]:
+    raw = cfg.get("portfolio_advisor_send_windows")
+    if not raw:
+        return _DEFAULT_SEND_WINDOWS_UK
+    out: List[tuple] = []
+    if isinstance(raw, list):
+        for pair in raw:
+            if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                start = _parse_hhmm(str(pair[0]))
+                end = _parse_hhmm(str(pair[1]))
+                if start and end:
+                    out.append((start, end))
+    return out or _DEFAULT_SEND_WINDOWS_UK
+
+
+def _within_send_window(cfg: Dict[str, Any], now: Optional[datetime] = None) -> bool:
+    """True when local time (Europe/London) sits inside any configured window.
+
+    On exotic environments without zoneinfo we open the gate (return True) so
+    quiet hours never silently break delivery.
+    """
+    if not bool(cfg.get("portfolio_advisor_quiet_hours_enabled", True)):
+        return True
+    if ZoneInfo is None:
+        return True
+    tz_name = str(cfg.get("portfolio_advisor_quiet_hours_tz") or _DEFAULT_QUIET_TZ)
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        return True
+    moment = (now or datetime.now(timezone.utc)).astimezone(tz).time()
+    for start, end in _send_windows(cfg):
+        if start <= end:
+            if start <= moment <= end:
+                return True
+        else:  # window crosses midnight
+            if moment >= start or moment <= end:
+                return True
+    return False
 
 
 def ntfy_verdict(text: str, ticker: str) -> str:
@@ -142,10 +203,11 @@ def send_telegram_message(cfg: Dict[str, Any], subject: str, body: str) -> bool:
 
 
 def _message_dedupe_minutes(cfg: Dict[str, Any]) -> int:
+    # 24h default (was 180min). Telegram users complained about repeats.
     try:
-        return max(0, int(cfg.get("portfolio_advisor_message_dedupe_minutes", 180) or 0))
+        return max(0, int(cfg.get("portfolio_advisor_message_dedupe_minutes", 1440) or 0))
     except (TypeError, ValueError):
-        return 180
+        return 1440
 
 
 def _normalize_message_for_dedupe(text: str) -> str:
@@ -184,7 +246,7 @@ def _recent_duplicate_message(cfg: Dict[str, Any], subject: str, body: str) -> O
         if (now - ts).total_seconds() > minutes * 60:
             continue
         old = _normalize_message_for_dedupe(str(row.get("body") or ""))
-        if old == norm or SequenceMatcher(None, old, norm).ratio() >= 0.88:
+        if old == norm or SequenceMatcher(None, old, norm).ratio() >= 0.75:
             return row
     return None
 
@@ -269,13 +331,25 @@ def load_recent_messages(
     return out
 
 
-def send_advisor_message(cfg: Dict[str, Any], subject: str, body: str) -> bool:
-    """Post to analysis webhook and/or SMTP when configured.
+def send_advisor_message(
+    cfg: Dict[str, Any],
+    subject: str,
+    body: str,
+    *,
+    urgent: bool = False,
+) -> bool:
+    """Post to analysis webhook and/or Telegram and/or SMTP when configured.
 
     Call this whenever the portfolio advisor needs to reach the user (alerts,
     weekly heartbeat, job lifecycle, manual ``portfolio alert``, etc.).
     Always appends a row to the JSONL message log (regardless of channel
     success) so the UI Messages page can render notifications offline.
+
+    ``urgent=True`` bypasses the quiet-hours window. Use it for: chat replies
+    (user-initiated), system-failure alerts, watchdog price triggers, and
+    anything the PM itself flagged with ``push_note``. Routine PM cycles
+    leave urgent=False so they hold until the next morning/evening window.
+
     Returns True if at least one channel succeeded or was attempted with 2xx.
     """
     duplicate = _recent_duplicate_message(cfg, subject, body)
@@ -293,6 +367,23 @@ def send_advisor_message(cfg: Dict[str, Any], subject: str, body: str) -> bool:
             suppressed_duplicate=True,
         )
         logger.info("suppressed duplicate advisor message: %s", subject[:120])
+        return False
+
+    if not urgent and not _within_send_window(cfg):
+        # Quiet hours: record to dashboard so it isn't lost, but skip push channels.
+        append_message_record(
+            cfg,
+            subject=subject,
+            body=body,
+            webhook_ok=False,
+            telegram_ok=False,
+            smtp_ok=False,
+            webhook_attempted=False,
+            telegram_attempted=False,
+            smtp_attempted=False,
+            suppressed_duplicate=False,
+        )
+        logger.info("held outside send window (quiet hours): %s", subject[:120])
         return False
 
     webhook_ok = False

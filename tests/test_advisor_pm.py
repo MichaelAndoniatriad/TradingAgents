@@ -154,8 +154,10 @@ def test_run_pm_cycle_combines_action_alert_and_push_note(tmp_path):
                     run_pm_cycle(cfg, trigger="test_trigger")
 
     assert send.call_count == 1
-    assert send.call_args[0][1] == "Action required"
-    assert "PM note:" in send.call_args[0][2]
+    assert send.call_args[0][1] == "PM"
+    # Body should be the PM's own push_note (no rigid header, no "PM note:" prefix).
+    assert send.call_args[0][2] == "Do not send this as a separate PM message."
+    assert send.call_args.kwargs.get("urgent") is True
 
 
 def test_run_pm_cycle_prompt_includes_latest_research(tmp_path):

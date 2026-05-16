@@ -14,7 +14,7 @@ import os
 import time
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from langchain_core.messages import HumanMessage
 
@@ -222,12 +222,31 @@ def _build_prompt(
     return template.format(sym=sym, today=today, shared=shared_header, rules=_OUTPUT_RULES)
 
 
-def _reasoning_llm(cfg: Dict[str, Any]):
+# Per-job-type model routing for single_model analyses. R1's chain-of-thought is
+# only worth its premium on post_earnings (fresh reasoning over a print) — the
+# routine/thesis/weekly variants are summarization over existing memos and run
+# fine on V4 Flash. Per-job override via
+# ``portfolio_advisor_single_model_models = {"post_earnings": "deepseek/deepseek-r1", ...}``.
+_DEFAULT_JOB_TYPE_MODELS: Dict[str, str] = {
+    "post_earnings": "deepseek/deepseek-r1",
+    "thesis_check": "deepseek/deepseek-v4-flash",
+    "routine_monitoring": "deepseek/deepseek-v4-flash",
+    "weekly_summary": "deepseek/deepseek-v4-flash",
+}
+
+
+def _reasoning_llm(cfg: Dict[str, Any], job_type: Optional[str] = None):
+    jt = (job_type or "").strip().lower()
+    overrides = cfg.get("portfolio_advisor_single_model_models") or {}
+    overrides = overrides if isinstance(overrides, dict) else {}
     model = (
-        cfg.get("portfolio_advisor_single_model_reasoning_model")
+        overrides.get(jt)
+        or _DEFAULT_JOB_TYPE_MODELS.get(jt)
+        or cfg.get("portfolio_advisor_single_model_reasoning_model")
         or cfg.get("portfolio_advisor_reasoning_model")
-        or "deepseek/deepseek-r1"
-    ).strip()
+        or "deepseek/deepseek-v4-flash"
+    )
+    model = str(model).strip()
     provider = (cfg.get("llm_provider") or "openrouter").lower()
     if "/" in model and provider != "openrouter":
         provider = "openrouter"
@@ -269,7 +288,7 @@ def run_single_model_analysis(
         return cached
 
     prompt = _build_prompt(cfg, jt, sym, today, px_line, md_ctx, ev_ctx)
-    llm = _reasoning_llm(cfg)
+    llm = _reasoning_llm(cfg, job_type=jt)
     msg = llm.invoke([HumanMessage(content=prompt)])
     content = getattr(msg, "content", str(msg))
     if isinstance(content, list):

@@ -83,9 +83,44 @@ def list_pending_jobs(state: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def claim_jobs_for_run(state: Dict[str, Any], job_ids: List[str]) -> None:
     """Mark jobs as in_progress so concurrent cron ticks don't double-run them."""
+    from datetime import datetime, timezone
+
+    now_iso = datetime.now(timezone.utc).isoformat()
     for j in state.get("jobs") or []:
         if j.get("id") in job_ids and j.get("status") == "pending":
             j["status"] = "in_progress"
+            j["claimed_at"] = now_iso
+
+
+def reset_stalled_in_progress_jobs(state: Dict[str, Any], ttl_seconds: int) -> List[str]:
+    """Reset ``in_progress`` jobs whose claim is older than ``ttl_seconds`` back to ``pending``.
+
+    Without this, a crashed ``run_due`` leaves jobs stuck forever — they'd be
+    skipped on every future tick. Returns the IDs that were reset.
+    """
+    from datetime import datetime, timezone
+
+    if ttl_seconds <= 0:
+        return []
+    now = datetime.now(timezone.utc)
+    reset_ids: List[str] = []
+    for j in state.get("jobs") or []:
+        if j.get("status") != "in_progress":
+            continue
+        claimed_raw = j.get("claimed_at") or j.get("started_at") or j.get("scheduled_at") or ""
+        try:
+            claimed_at = datetime.fromisoformat(str(claimed_raw).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        if claimed_at.tzinfo is None:
+            claimed_at = claimed_at.replace(tzinfo=timezone.utc)
+        if (now - claimed_at).total_seconds() >= ttl_seconds:
+            j["status"] = "pending"
+            j["reset_count"] = int(j.get("reset_count") or 0) + 1
+            j["last_reset_iso"] = now.isoformat()
+            j.pop("claimed_at", None)
+            reset_ids.append(str(j.get("id") or ""))
+    return reset_ids
 
 
 def cancel_job(state: Dict[str, Any], job_id: str, reason: str = "") -> bool:

@@ -123,6 +123,7 @@ def run_watchdog(cfg: Dict[str, Any], *, ignore_market_hours: bool = False) -> i
             cfg,
             "[TradingAgents] Watchdog CRITICAL dd40_mandatory_exit",
             "\n".join(lines),
+            urgent=True,
         )
         append_event(
             cfg,
@@ -146,6 +147,7 @@ def run_watchdog(cfg: Dict[str, Any], *, ignore_market_hours: bool = False) -> i
             cfg,
             "[TradingAgents] Watchdog HIGH sell_half double_or_pre_earnings",
             "\n".join(lines),
+            urgent=True,
         )
         append_event(
             cfg,
@@ -169,6 +171,7 @@ def run_watchdog(cfg: Dict[str, Any], *, ignore_market_hours: bool = False) -> i
             cfg,
             "[TradingAgents] Watchdog HIGH dd30_review",
             "\n".join(lines),
+            urgent=True,
         )
         append_event(
             cfg,

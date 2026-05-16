@@ -30,6 +30,14 @@ export PYTHONPATH="${ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 
 _ts() { date "+%Y-%m-%dT%H:%M:%S%z"; }
 
+LOCK="$HOME/.tradingagents/run/cron-portfolio-advisor-replan.lock"
+mkdir -p "$(dirname "$LOCK")"
+exec 200>"$LOCK"
+if ! flock -n 200; then
+  echo "$(_ts) cron-portfolio-advisor-replan: another instance is holding the lock; exiting" >>"$LOG"
+  exit 0
+fi
+
 {
   echo "===== $(_ts) portfolio advisor replan start ====="
   set +e
