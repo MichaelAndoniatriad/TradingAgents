@@ -397,6 +397,77 @@ def portfolio_advisor_pm_cycle(
         raise typer.Exit(1) from e
 
 
+@portfolio_app.command("cost-report")
+def portfolio_cost_report(
+    days: int = typer.Option(7, "--days", help="Lookback window in days (default 7)."),
+):
+    """Show LLM spend: daily totals, top models, top individual calls."""
+    from rich.table import Table
+    from rich import box
+    from tradingagents.llm_clients.cost_report import (
+        load_records,
+        daily_spend,
+        model_spend,
+        top_calls,
+        null_cost_count,
+        total_spend,
+    )
+
+    records = load_records(days=days)
+    if not records:
+        console.print(f"[yellow]No cost records found for the last {days} day(s).[/yellow]")
+        return
+
+    null_count = null_cost_count(records)
+    grand_total = total_spend(records)
+
+    console.print(f"\n[bold]LLM Cost Report[/bold] — last {days} day(s)\n")
+    if null_count:
+        console.print(
+            f"[yellow]Warning:[/yellow] {null_count} call(s) have null cost_usd "
+            "(model not in pricing table).\n"
+        )
+
+    # Total and per-day breakdown
+    console.print(f"[bold]Total spend:[/bold] ${grand_total:.4f}")
+    day_totals = daily_spend(records)
+    if day_totals:
+        day_table = Table(box=box.SIMPLE_HEAD, show_header=True, header_style="bold magenta")
+        day_table.add_column("Date", style="cyan")
+        day_table.add_column("Spend (USD)", justify="right")
+        for day, cost in day_totals.items():
+            day_table.add_row(day, f"${cost:.4f}")
+        console.print(day_table)
+
+    # Top 5 models
+    console.print("\n[bold]Top 5 models by cost:[/bold]")
+    model_table = Table(box=box.SIMPLE_HEAD, show_header=True, header_style="bold magenta")
+    model_table.add_column("Model", style="cyan")
+    model_table.add_column("Calls", justify="right")
+    model_table.add_column("Total (USD)", justify="right")
+    for model, count, cost in model_spend(records)[:5]:
+        model_table.add_row(model, str(count), f"${cost:.4f}")
+    console.print(model_table)
+
+    # Top 5 individual calls
+    console.print("\n[bold]Top 5 most expensive calls:[/bold]")
+    call_table = Table(box=box.SIMPLE_HEAD, show_header=True, header_style="bold magenta")
+    call_table.add_column("Timestamp", style="cyan")
+    call_table.add_column("Model")
+    call_table.add_column("Tokens", justify="right")
+    call_table.add_column("Cost (USD)", justify="right")
+    for rec in top_calls(records, 5):
+        cost_str = f"${rec['cost_usd']:.4f}" if rec.get("cost_usd") is not None else "null"
+        call_table.add_row(
+            str(rec.get("ts", ""))[:19],
+            str(rec.get("model", "")),
+            str(rec.get("total_tokens", 0)),
+            cost_str,
+        )
+    console.print(call_table)
+    console.print(f"\n[dim]Calls with unknown pricing: {null_count}[/dim]")
+
+
 @portfolio_app.command("telegram-listen")
 def portfolio_advisor_telegram_listen(
     once: bool = typer.Option(False, "--once", help="Poll once and exit."),

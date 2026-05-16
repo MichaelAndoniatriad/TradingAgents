@@ -48,7 +48,7 @@ ANALYST_LABELS = {
 }
 PROVIDERS = ["openrouter", "openai", "google", "anthropic", "ollama", "deepseek", "xai"]
 
-NAV_PAGES = ["Dashboard", "Settings"]
+NAV_PAGES = ["Dashboard", "Cost", "Settings"]
 
 AGENT_SPEC_LABELS = {
     "market_analyst": "Market analyst",
@@ -2292,6 +2292,75 @@ def _settings_llm_tab() -> None:
         st.rerun()
 
 
+def _page_cost() -> None:
+    from tradingagents.llm_clients.cost_report import (
+        load_records,
+        daily_spend,
+        model_spend,
+        null_cost_count,
+        total_spend,
+    )
+
+    _page_header("Cost", "LLM spend from ~/.tradingagents/logs/cost.jsonl")
+
+    records_30 = load_records(days=30)
+    null_n = null_cost_count(records_30)
+
+    if null_n:
+        st.warning(
+            f"{null_n} call(s) in the last 30 days have **null** cost_usd — "
+            "model slug not in the pricing table in `cost_logger.py`."
+        )
+    else:
+        st.caption("All calls in the last 30 days have known pricing.")
+
+    if not records_30:
+        st.info("No cost records found for the last 30 days. Run some analyses to populate the log.")
+        return
+
+    grand_total = total_spend(records_30)
+    st.metric("Total spend (30 days)", f"${grand_total:.4f}")
+
+    st.subheader("Daily spend (last 30 days)")
+    day_totals = daily_spend(records_30)
+    if day_totals:
+        df_daily = pd.DataFrame(
+            {"Date": list(day_totals.keys()), "Spend (USD)": list(day_totals.values())}
+        ).set_index("Date")
+        st.line_chart(df_daily, use_container_width=True)
+    else:
+        st.caption("No priced calls in this window.")
+
+    st.subheader("Spend by model (last 30 days)")
+    ms = model_spend(records_30)
+    if ms:
+        df_model = pd.DataFrame(ms, columns=["Model", "Calls", "Total (USD)"])
+        df_bar = df_model.set_index("Model")[["Total (USD)"]]
+        st.bar_chart(df_bar, use_container_width=True)
+        st.dataframe(df_model, use_container_width=True, hide_index=True)
+
+    st.subheader("Last 100 calls")
+    all_records = load_records(days=None)
+    recent = sorted(all_records, key=lambda r: r.get("ts") or "", reverse=True)[:100]
+    if recent:
+        df_calls = pd.DataFrame(
+            [
+                {
+                    "Timestamp": str(r.get("ts", ""))[:19],
+                    "Model": r.get("model", ""),
+                    "Prompt tokens": r.get("prompt_tokens", 0),
+                    "Completion tokens": r.get("completion_tokens", 0),
+                    "Total tokens": r.get("total_tokens", 0),
+                    "Cost (USD)": r.get("cost_usd"),
+                }
+                for r in recent
+            ]
+        )
+        st.dataframe(df_calls, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No records found.")
+
+
 def _page_settings() -> None:
     _page_header(
         "Settings",
@@ -2524,6 +2593,8 @@ def main() -> None:
 
     if page == "Dashboard":
         _page_dashboard()
+    elif page == "Cost":
+        _page_cost()
     else:
         _page_settings()
 
