@@ -167,6 +167,15 @@ def run_morning_digest(cfg: Dict[str, Any]) -> bool:
     body = format_digest(cfg)
     if not body:
         return False
-    # Morning digest is the routine wake-up; always fire when called.
     messaging.send_advisor_message(cfg, "Morning action digest", body, urgent=True)
+    return True
+
+
+def run_evening_digest(cfg: Dict[str, Any]) -> bool:
+    """Send evening digest of open action items. Returns True if anything was sent."""
+    from tradingagents.portfolio_advisor import messaging
+    body = format_digest(cfg)
+    if not body:
+        return False
+    messaging.send_advisor_message(cfg, "Evening action digest", body, urgent=True)
     return True
